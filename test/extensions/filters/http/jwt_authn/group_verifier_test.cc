@@ -63,7 +63,7 @@ rules:
             - provider_name: "provider_4"
 )";
 
-using StatusMap = std::unordered_map<std::string, const Status&>;
+using StatusMap = absl::node_hash_map<std::string, const Status>;
 
 constexpr auto allowfailed = "_allow_failed_";
 
@@ -109,9 +109,9 @@ public:
     return struct_obj;
   }
 
-  std::unordered_map<std::string, AuthenticatorCallback>
+  absl::node_hash_map<std::string, AuthenticatorCallback>
   createAsyncMockAuthsAndVerifier(const std::vector<std::string>& providers) {
-    std::unordered_map<std::string, AuthenticatorCallback> callbacks;
+    absl::node_hash_map<std::string, AuthenticatorCallback> callbacks;
     for (const auto& provider : providers) {
       auto mock_auth = std::make_unique<MockAuthenticator>();
       EXPECT_CALL(*mock_auth, doVerify(_, _, _, _, _))
@@ -130,7 +130,7 @@ public:
   JwtAuthentication proto_config_;
   VerifierConstPtr verifier_;
   MockVerifierCallbacks mock_cb_;
-  std::unordered_map<std::string, std::unique_ptr<MockAuthenticator>> mock_auths_;
+  absl::node_hash_map<std::string, std::unique_ptr<MockAuthenticator>> mock_auths_;
   NiceMock<MockAuthFactory> mock_factory_;
   ContextSharedPtr context_;
   NiceMock<Tracing::MockSpan> parent_span_;
@@ -353,12 +353,57 @@ TEST_F(GroupVerifierTest, TestRequiresAnyLastAuthOk) {
 TEST_F(GroupVerifierTest, TestRequiresAnyAllAuthFailed) {
   TestUtility::loadFromYaml(RequiresAnyConfig, proto_config_);
   auto mock_auth = std::make_unique<MockAuthenticator>();
+  createSyncMockAuthsAndVerifier(StatusMap{{"example_provider", Status::JwtMissed},
+                                           {"other_provider", Status::JwtHeaderBadKid}});
+
+  // onComplete with failure status, not payload
+  EXPECT_CALL(mock_cb_, setPayload(_)).Times(0);
+  EXPECT_CALL(mock_cb_, onComplete(Status::JwtHeaderBadKid)).Times(1);
+  auto headers = Http::TestRequestHeaderMapImpl{
+      {"example-auth-userinfo", ""},
+      {"other-auth-userinfo", ""},
+  };
+  context_ = Verifier::createContext(headers, parent_span_, &mock_cb_);
+  verifier_->verify(context_);
+  EXPECT_FALSE(headers.has("example-auth-userinfo"));
+  EXPECT_FALSE(headers.has("other-auth-userinfo"));
+}
+
+// Test requires any with both auth returning errors, last error is JwtMissed.
+// Usually the final error is from the last one.
+// But if a token is not for a provider, that provider auth will either return
+// JwtMissed or JwtUnknownIssuer, such error should not be used for the final
+// error in Any case
+TEST_F(GroupVerifierTest, TestRequiresAnyLastIsJwtMissed) {
+  TestUtility::loadFromYaml(RequiresAnyConfig, proto_config_);
+  auto mock_auth = std::make_unique<MockAuthenticator>();
+  createSyncMockAuthsAndVerifier(StatusMap{{"example_provider", Status::JwtHeaderBadKid},
+                                           {"other_provider", Status::JwtMissed}});
+
+  // onComplete with failure status, not payload
+  EXPECT_CALL(mock_cb_, setPayload(_)).Times(0);
+  EXPECT_CALL(mock_cb_, onComplete(Status::JwtHeaderBadKid)).Times(1);
+  auto headers = Http::TestRequestHeaderMapImpl{
+      {"example-auth-userinfo", ""},
+      {"other-auth-userinfo", ""},
+  };
+  context_ = Verifier::createContext(headers, parent_span_, &mock_cb_);
+  verifier_->verify(context_);
+  EXPECT_FALSE(headers.has("example-auth-userinfo"));
+  EXPECT_FALSE(headers.has("other-auth-userinfo"));
+}
+
+// Test requires any with both auth returning errors: last error is
+// JwtUnknownIssuer
+TEST_F(GroupVerifierTest, TestRequiresAnyLastIsJwtUnknownIssuer) {
+  TestUtility::loadFromYaml(RequiresAnyConfig, proto_config_);
+  auto mock_auth = std::make_unique<MockAuthenticator>();
   createSyncMockAuthsAndVerifier(StatusMap{{"example_provider", Status::JwtHeaderBadKid},
                                            {"other_provider", Status::JwtUnknownIssuer}});
 
   // onComplete with failure status, not payload
   EXPECT_CALL(mock_cb_, setPayload(_)).Times(0);
-  EXPECT_CALL(mock_cb_, onComplete(Status::JwtUnknownIssuer)).Times(1);
+  EXPECT_CALL(mock_cb_, onComplete(Status::JwtHeaderBadKid)).Times(1);
   auto headers = Http::TestRequestHeaderMapImpl{
       {"example-auth-userinfo", ""},
       {"other-auth-userinfo", ""},

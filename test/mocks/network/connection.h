@@ -60,6 +60,7 @@ public:
   MOCK_METHOD(void, close, (ConnectionCloseType type));
   MOCK_METHOD(Event::Dispatcher&, dispatcher, ());
   MOCK_METHOD(uint64_t, id, (), (const));
+  MOCK_METHOD(void, hashKey, (std::vector<uint8_t>&), (const));
   MOCK_METHOD(bool, initializeReadFilters, ());
   MOCK_METHOD(std::string, nextProtocol, (), (const));
   MOCK_METHOD(void, noDelay, (bool enable));
@@ -67,6 +68,7 @@ public:
   MOCK_METHOD(void, detectEarlyCloseWhenReadDisabled, (bool));
   MOCK_METHOD(bool, readEnabled, (), (const));
   MOCK_METHOD(const Address::InstanceConstSharedPtr&, remoteAddress, (), (const));
+  MOCK_METHOD(const Address::InstanceConstSharedPtr&, directRemoteAddress, (), (const));
   MOCK_METHOD(absl::optional<Connection::UnixDomainSocketPeerCredentials>,
               unixSocketPeerCredentials, (), (const));
   MOCK_METHOD(const Address::InstanceConstSharedPtr&, localAddress, (), (const));
@@ -84,6 +86,7 @@ public:
   MOCK_METHOD(const StreamInfo::StreamInfo&, streamInfo, (), (const));
   MOCK_METHOD(void, setDelayedCloseTimeout, (std::chrono::milliseconds));
   MOCK_METHOD(absl::string_view, transportFailureReason, (), (const));
+  MOCK_METHOD(absl::optional<std::chrono::milliseconds>, lastRoundTripTime, (), (const));
 };
 
 /**
@@ -105,6 +108,7 @@ public:
   MOCK_METHOD(void, close, (ConnectionCloseType type));
   MOCK_METHOD(Event::Dispatcher&, dispatcher, ());
   MOCK_METHOD(uint64_t, id, (), (const));
+  MOCK_METHOD(void, hashKey, (std::vector<uint8_t>&), (const));
   MOCK_METHOD(bool, initializeReadFilters, ());
   MOCK_METHOD(std::string, nextProtocol, (), (const));
   MOCK_METHOD(void, noDelay, (bool enable));
@@ -112,6 +116,7 @@ public:
   MOCK_METHOD(void, detectEarlyCloseWhenReadDisabled, (bool));
   MOCK_METHOD(bool, readEnabled, (), (const));
   MOCK_METHOD(const Address::InstanceConstSharedPtr&, remoteAddress, (), (const));
+  MOCK_METHOD(const Address::InstanceConstSharedPtr&, directRemoteAddress, (), (const));
   MOCK_METHOD(absl::optional<Connection::UnixDomainSocketPeerCredentials>,
               unixSocketPeerCredentials, (), (const));
   MOCK_METHOD(const Address::InstanceConstSharedPtr&, localAddress, (), (const));
@@ -129,6 +134,7 @@ public:
   MOCK_METHOD(const StreamInfo::StreamInfo&, streamInfo, (), (const));
   MOCK_METHOD(void, setDelayedCloseTimeout, (std::chrono::milliseconds));
   MOCK_METHOD(absl::string_view, transportFailureReason, (), (const));
+  MOCK_METHOD(absl::optional<std::chrono::milliseconds>, lastRoundTripTime, (), (const));
 
   // Network::ClientConnection
   MOCK_METHOD(void, connect, ());
@@ -153,6 +159,7 @@ public:
   MOCK_METHOD(void, close, (ConnectionCloseType type));
   MOCK_METHOD(Event::Dispatcher&, dispatcher, ());
   MOCK_METHOD(uint64_t, id, (), (const));
+  MOCK_METHOD(void, hashKey, (std::vector<uint8_t>&), (const));
   MOCK_METHOD(bool, initializeReadFilters, ());
   MOCK_METHOD(std::string, nextProtocol, (), (const));
   MOCK_METHOD(void, noDelay, (bool enable));
@@ -160,6 +167,7 @@ public:
   MOCK_METHOD(void, detectEarlyCloseWhenReadDisabled, (bool));
   MOCK_METHOD(bool, readEnabled, (), (const));
   MOCK_METHOD(const Address::InstanceConstSharedPtr&, remoteAddress, (), (const));
+  MOCK_METHOD(const Address::InstanceConstSharedPtr&, directRemoteAddress, (), (const));
   MOCK_METHOD(absl::optional<Connection::UnixDomainSocketPeerCredentials>,
               unixSocketPeerCredentials, (), (const));
   MOCK_METHOD(const Address::InstanceConstSharedPtr&, localAddress, (), (const));
@@ -177,6 +185,7 @@ public:
   MOCK_METHOD(const StreamInfo::StreamInfo&, streamInfo, (), (const));
   MOCK_METHOD(void, setDelayedCloseTimeout, (std::chrono::milliseconds));
   MOCK_METHOD(absl::string_view, transportFailureReason, (), (const));
+  MOCK_METHOD(absl::optional<std::chrono::milliseconds>, lastRoundTripTime, (), (const));
 
   // Network::FilterManagerConnection
   MOCK_METHOD(StreamBuffer, getReadBuffer, ());

@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "envoy/tracing/http_tracer.h"
+#include "envoy/tracing/http_tracer_manager.h"
 
 #include "gmock/gmock.h"
 
@@ -36,6 +37,8 @@ public:
   MOCK_METHOD(void, finishSpan, ());
   MOCK_METHOD(void, injectContext, (Http::RequestHeaderMap & request_headers));
   MOCK_METHOD(void, setSampled, (const bool sampled));
+  MOCK_METHOD(void, setBaggage, (absl::string_view key, absl::string_view value));
+  MOCK_METHOD(std::string, getBaggage, (absl::string_view key));
 
   SpanPtr spawnChild(const Config& config, const std::string& name,
                      SystemTime start_time) override {
@@ -79,6 +82,15 @@ public:
               (const Config& config, Http::HeaderMap& request_headers,
                const std::string& operation_name, SystemTime start_time,
                const Tracing::Decision tracing_decision));
+};
+
+class MockHttpTracerManager : public HttpTracerManager {
+public:
+  MockHttpTracerManager();
+  ~MockHttpTracerManager() override;
+
+  MOCK_METHOD(HttpTracerSharedPtr, getOrCreateHttpTracer,
+              (const envoy::config::trace::v3::Tracing_Http*));
 };
 
 } // namespace Tracing

@@ -1,13 +1,17 @@
 #include "envoy/config/cluster/v3/cluster.pb.h"
 #include "envoy/extensions/common/dynamic_forward_proxy/v3/dns_cache.pb.h"
 
+#include "common/config/utility.h"
+
 #include "extensions/common/dynamic_forward_proxy/dns_cache_impl.h"
 #include "extensions/common/dynamic_forward_proxy/dns_cache_manager_impl.h"
 
 #include "test/extensions/common/dynamic_forward_proxy/mocks.h"
 #include "test/mocks/network/mocks.h"
+#include "test/mocks/runtime/mocks.h"
 #include "test/mocks/thread_local/mocks.h"
 #include "test/test_common/simulated_time_system.h"
+#include "test/test_common/test_runtime.h"
 #include "test/test_common/utility.h"
 
 using testing::InSequence;
@@ -27,7 +31,8 @@ public:
     config_.set_dns_lookup_family(envoy::config::cluster::v3::Cluster::V4_ONLY);
 
     EXPECT_CALL(dispatcher_, createDnsResolver(_, _)).WillOnce(Return(resolver_));
-    dns_cache_ = std::make_unique<DnsCacheImpl>(dispatcher_, tls_, store_, config_);
+    dns_cache_ =
+        std::make_unique<DnsCacheImpl>(dispatcher_, tls_, random_, loader_, store_, config_);
     update_callbacks_handle_ = dns_cache_->addUpdateCallbacks(update_callbacks_);
   }
 
@@ -55,6 +60,8 @@ public:
   NiceMock<Event::MockDispatcher> dispatcher_;
   std::shared_ptr<Network::MockDnsResolver> resolver_{std::make_shared<Network::MockDnsResolver>()};
   NiceMock<ThreadLocal::MockInstance> tls_;
+  NiceMock<Random::MockRandomGenerator> random_;
+  NiceMock<Runtime::MockLoader> loader_;
   Stats::IsolatedStoreImpl store_;
   std::unique_ptr<DnsCache> dns_cache_;
   MockUpdateCallbacks update_callbacks_;
@@ -261,7 +268,7 @@ TEST_F(DnsCacheImplTest, TTL) {
              1 /* added */, 0 /* removed */, 1 /* num hosts */);
 
   // Re-resolve with ~60s passed. TTL should still be OK at default of 5 minutes.
-  simTime().sleep(std::chrono::milliseconds(60001));
+  simTime().advanceTimeWait(std::chrono::milliseconds(60001));
   EXPECT_CALL(*resolver_, resolve("foo.com", _, _))
       .WillOnce(DoAll(SaveArg<2>(&resolve_cb), Return(&resolver_->active_query_)));
   resolve_timer->invokeCallback();
@@ -276,7 +283,7 @@ TEST_F(DnsCacheImplTest, TTL) {
 
   // Re-resolve with ~5m passed. This is not realistic as we would have re-resolved many times
   // during this period but it's good enough for the test.
-  simTime().sleep(std::chrono::milliseconds(300000));
+  simTime().advanceTimeWait(std::chrono::milliseconds(300000));
   EXPECT_CALL(update_callbacks_, onDnsHostRemove("foo.com"));
   resolve_timer->invokeCallback();
   checkStats(2 /* attempt */, 2 /* success */, 0 /* failure */, 1 /* address changed */,
@@ -317,7 +324,7 @@ TEST_F(DnsCacheImplTest, TTLWithCustomParameters) {
              TestUtility::makeDnsResponse({"10.0.0.1"}, std::chrono::seconds(0)));
 
   // Re-resolve with ~30s passed. TTL should still be OK at 60s.
-  simTime().sleep(std::chrono::milliseconds(30001));
+  simTime().advanceTimeWait(std::chrono::milliseconds(30001));
   EXPECT_CALL(*resolver_, resolve("foo.com", _, _))
       .WillOnce(DoAll(SaveArg<2>(&resolve_cb), Return(&resolver_->active_query_)));
   resolve_timer->invokeCallback();
@@ -326,7 +333,7 @@ TEST_F(DnsCacheImplTest, TTLWithCustomParameters) {
              TestUtility::makeDnsResponse({"10.0.0.1"}));
 
   // Re-resolve with ~30s passed. TTL should expire.
-  simTime().sleep(std::chrono::milliseconds(30001));
+  simTime().advanceTimeWait(std::chrono::milliseconds(30001));
   EXPECT_CALL(update_callbacks_, onDnsHostRemove("foo.com"));
   resolve_timer->invokeCallback();
 }
@@ -388,7 +395,50 @@ TEST_F(DnsCacheImplTest, ResolveFailure) {
 
   // Re-resolve with ~5m passed. This is not realistic as we would have re-resolved many times
   // during this period but it's good enough for the test.
-  simTime().sleep(std::chrono::milliseconds(300001));
+  simTime().advanceTimeWait(std::chrono::milliseconds(300001));
+  // Because resolution failed for the host, onDnsHostAddOrUpdate was not called.
+  // Therefore, onDnsHostRemove should not be called either.
+  EXPECT_CALL(update_callbacks_, onDnsHostRemove(_)).Times(0);
+  resolve_timer->invokeCallback();
+  // DnsCacheImpl state is updated accordingly: the host is removed.
+  checkStats(1 /* attempt */, 0 /* success */, 1 /* failure */, 0 /* address changed */,
+             1 /* added */, 1 /* removed */, 0 /* num hosts */);
+}
+
+TEST_F(DnsCacheImplTest, ResolveFailureWithFailureRefreshRate) {
+  *config_.mutable_dns_failure_refresh_rate()->mutable_base_interval() =
+      Protobuf::util::TimeUtil::SecondsToDuration(7);
+  *config_.mutable_dns_failure_refresh_rate()->mutable_max_interval() =
+      Protobuf::util::TimeUtil::SecondsToDuration(10);
+  initialize();
+  InSequence s;
+
+  MockLoadDnsCacheEntryCallbacks callbacks;
+  Network::DnsResolver::ResolveCb resolve_cb;
+  Event::MockTimer* resolve_timer = new Event::MockTimer(&dispatcher_);
+  EXPECT_CALL(*resolver_, resolve("foo.com", _, _))
+      .WillOnce(DoAll(SaveArg<2>(&resolve_cb), Return(&resolver_->active_query_)));
+  auto result = dns_cache_->loadDnsCacheEntry("foo.com", 80, callbacks);
+  EXPECT_EQ(DnsCache::LoadDnsCacheEntryStatus::Loading, result.status_);
+  EXPECT_NE(result.handle_, nullptr);
+  checkStats(1 /* attempt */, 0 /* success */, 0 /* failure */, 0 /* address changed */,
+             1 /* added */, 0 /* removed */, 1 /* num hosts */);
+
+  EXPECT_CALL(update_callbacks_, onDnsHostAddOrUpdate(_, _)).Times(0);
+  EXPECT_CALL(callbacks, onLoadDnsCacheComplete());
+  ON_CALL(random_, random()).WillByDefault(Return(8000));
+  EXPECT_CALL(*resolve_timer, enableTimer(std::chrono::milliseconds(1000), _));
+  resolve_cb(Network::DnsResolver::ResolutionStatus::Failure, TestUtility::makeDnsResponse({}));
+  checkStats(1 /* attempt */, 0 /* success */, 1 /* failure */, 0 /* address changed */,
+             1 /* added */, 0 /* removed */, 1 /* num hosts */);
+
+  result = dns_cache_->loadDnsCacheEntry("foo.com", 80, callbacks);
+  EXPECT_EQ(DnsCache::LoadDnsCacheEntryStatus::InCache, result.status_);
+  EXPECT_EQ(result.handle_, nullptr);
+
+  // Re-resolve with ~5m passed. This is not realistic as we would have re-resolved many times
+  // during this period but it's good enough for the test.
+  simTime().advanceTimeWait(std::chrono::milliseconds(300001));
   // Because resolution failed for the host, onDnsHostAddOrUpdate was not called.
   // Therefore, onDnsHostRemove should not be called either.
   EXPECT_CALL(update_callbacks_, onDnsHostRemove(_)).Times(0);
@@ -427,7 +477,7 @@ TEST_F(DnsCacheImplTest, ResolveSuccessWithEmptyResult) {
 
   // Re-resolve with ~5m passed. This is not realistic as we would have re-resolved many times
   // during this period but it's good enough for the test.
-  simTime().sleep(std::chrono::milliseconds(300001));
+  simTime().advanceTimeWait(std::chrono::milliseconds(300001));
   // Because resolution failed for the host, onDnsHostAddOrUpdate was not called.
   // Therefore, onDnsHostRemove should not be called either.
   EXPECT_CALL(update_callbacks_, onDnsHostRemove(_)).Times(0);
@@ -595,12 +645,68 @@ TEST_F(DnsCacheImplTest, MaxHostOverflow) {
   EXPECT_EQ(1, TestUtility::findCounter(store_, "dns_cache.foo.host_overflow")->value());
 }
 
+TEST_F(DnsCacheImplTest, CircuitBreakersNotInvoked) {
+  initialize();
+
+  auto raii_ptr = dns_cache_->canCreateDnsRequest(absl::nullopt);
+  EXPECT_NE(raii_ptr.get(), nullptr);
+}
+
+TEST_F(DnsCacheImplTest, DnsCacheCircuitBreakersOverflow) {
+  config_.mutable_dns_cache_circuit_breaker()->mutable_max_pending_requests()->set_value(0);
+  initialize();
+
+  auto raii_ptr = dns_cache_->canCreateDnsRequest(absl::nullopt);
+  EXPECT_EQ(raii_ptr.get(), nullptr);
+  EXPECT_EQ(1, TestUtility::findCounter(store_, "dns_cache.foo.dns_rq_pending_overflow")->value());
+}
+
+TEST_F(DnsCacheImplTest, ClustersCircuitBreakersOverflow) {
+  initialize();
+  NiceMock<Upstream::MockBasicResourceLimit> pending_requests_;
+
+  EXPECT_CALL(pending_requests_, canCreate()).WillOnce(Return(false));
+  auto raii_ptr = dns_cache_->canCreateDnsRequest(pending_requests_);
+  EXPECT_EQ(raii_ptr.get(), nullptr);
+  EXPECT_EQ(0, TestUtility::findCounter(store_, "dns_cache.foo.dns_rq_pending_overflow")->value());
+}
+
+TEST(DnsCacheImplOptionsTest, UseTcpForDnsLookupsOptionSet) {
+  NiceMock<Event::MockDispatcher> dispatcher;
+  std::shared_ptr<Network::MockDnsResolver> resolver{std::make_shared<Network::MockDnsResolver>()};
+  NiceMock<ThreadLocal::MockInstance> tls;
+  NiceMock<Random::MockRandomGenerator> random;
+  NiceMock<Runtime::MockLoader> loader;
+  Stats::IsolatedStoreImpl store;
+
+  envoy::extensions::common::dynamic_forward_proxy::v3::DnsCacheConfig config;
+  config.set_use_tcp_for_dns_lookups(true);
+  EXPECT_CALL(dispatcher, createDnsResolver(_, true)).WillOnce(Return(resolver));
+  DnsCacheImpl dns_cache_(dispatcher, tls, random, loader, store, config);
+}
+
+TEST(DnsCacheImplOptionsTest, UseTcpForDnsLookupsOptionUnSet) {
+  NiceMock<Event::MockDispatcher> dispatcher;
+  std::shared_ptr<Network::MockDnsResolver> resolver{std::make_shared<Network::MockDnsResolver>()};
+  NiceMock<ThreadLocal::MockInstance> tls;
+  NiceMock<Random::MockRandomGenerator> random;
+  NiceMock<Runtime::MockLoader> loader;
+  Stats::IsolatedStoreImpl store;
+
+  envoy::extensions::common::dynamic_forward_proxy::v3::DnsCacheConfig config;
+  config.set_use_tcp_for_dns_lookups(false);
+  EXPECT_CALL(dispatcher, createDnsResolver(_, false)).WillOnce(Return(resolver));
+  DnsCacheImpl dns_cache_(dispatcher, tls, random, loader, store, config);
+}
+
 // DNS cache manager config tests.
 TEST(DnsCacheManagerImplTest, LoadViaConfig) {
   NiceMock<Event::MockDispatcher> dispatcher;
   NiceMock<ThreadLocal::MockInstance> tls;
+  NiceMock<Random::MockRandomGenerator> random;
+  NiceMock<Runtime::MockLoader> loader;
   Stats::IsolatedStoreImpl store;
-  DnsCacheManagerImpl cache_manager(dispatcher, tls, store);
+  DnsCacheManagerImpl cache_manager(dispatcher, tls, random, loader, store);
 
   envoy::extensions::common::dynamic_forward_proxy::v3::DnsCacheConfig config1;
   config1.set_name("foo");
@@ -623,6 +729,50 @@ TEST(DnsCacheManagerImplTest, LoadViaConfig) {
   config4.set_dns_lookup_family(envoy::config::cluster::v3::Cluster::V6_ONLY);
   EXPECT_THROW_WITH_MESSAGE(cache_manager.getCache(config4), EnvoyException,
                             "config specified DNS cache 'foo' with different settings");
+}
+
+// Note: this test is done here, rather than a TYPED_TEST_SUITE in
+// //test/common/config:utility_test, because we did not want to include an extension type in
+// non-extension test suites.
+// TODO(junr03): I ran into problems with templatizing this test and macro expansion.
+// I spent too much time trying to figure this out. So for the moment I have copied this test body
+// here. I will spend some more time fixing this, but wanted to land unblocking functionality first.
+TEST(UtilityTest, PrepareDnsRefreshStrategy) {
+  NiceMock<Random::MockRandomGenerator> random;
+
+  {
+    // dns_failure_refresh_rate not set.
+    envoy::extensions::common::dynamic_forward_proxy::v3::DnsCacheConfig dns_cache_config;
+    BackOffStrategyPtr strategy = Config::Utility::prepareDnsRefreshStrategy<
+        envoy::extensions::common::dynamic_forward_proxy::v3::DnsCacheConfig>(dns_cache_config,
+                                                                              5000, random);
+    EXPECT_NE(nullptr, dynamic_cast<FixedBackOffStrategy*>(strategy.get()));
+  }
+
+  {
+    // dns_failure_refresh_rate set.
+    envoy::extensions::common::dynamic_forward_proxy::v3::DnsCacheConfig dns_cache_config;
+    dns_cache_config.mutable_dns_failure_refresh_rate()->mutable_base_interval()->set_seconds(7);
+    dns_cache_config.mutable_dns_failure_refresh_rate()->mutable_max_interval()->set_seconds(10);
+    BackOffStrategyPtr strategy = Config::Utility::prepareDnsRefreshStrategy<
+        envoy::extensions::common::dynamic_forward_proxy::v3::DnsCacheConfig>(dns_cache_config,
+                                                                              5000, random);
+    EXPECT_NE(nullptr, dynamic_cast<JitteredExponentialBackOffStrategy*>(strategy.get()));
+  }
+
+  {
+    // dns_failure_refresh_rate set with invalid max_interval.
+    envoy::extensions::common::dynamic_forward_proxy::v3::DnsCacheConfig dns_cache_config;
+    dns_cache_config.mutable_dns_failure_refresh_rate()->mutable_base_interval()->set_seconds(7);
+    dns_cache_config.mutable_dns_failure_refresh_rate()->mutable_max_interval()->set_seconds(2);
+    EXPECT_THROW_WITH_REGEX(
+        Config::Utility::prepareDnsRefreshStrategy<
+            envoy::extensions::common::dynamic_forward_proxy::v3::DnsCacheConfig>(dns_cache_config,
+                                                                                  5000, random),
+        EnvoyException,
+        "dns_failure_refresh_rate must have max_interval greater than "
+        "or equal to the base_interval");
+  }
 }
 
 } // namespace

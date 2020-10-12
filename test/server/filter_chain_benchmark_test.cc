@@ -1,5 +1,4 @@
 #include <iostream>
-#include <unordered_map>
 
 #include "envoy/config/listener/v3/listener.pb.h"
 #include "envoy/config/listener/v3/listener_components.pb.h"
@@ -11,8 +10,9 @@
 
 #include "extensions/transport_sockets/well_known_names.h"
 
+#include "test/benchmark/main.h"
 #include "test/mocks/network/mocks.h"
-#include "test/mocks/server/mocks.h"
+#include "test/mocks/server/factory_context.h"
 #include "test/test_common/environment.h"
 #include "test/test_common/utility.h"
 
@@ -28,11 +28,11 @@ namespace Server {
 
 namespace {
 class MockFilterChainFactoryBuilder : public FilterChainFactoryBuilder {
-  std::unique_ptr<Network::FilterChain>
+  Network::DrainableFilterChainSharedPtr
   buildFilterChain(const envoy::config::listener::v3::FilterChain&,
                    FilterChainFactoryContextCreator&) const override {
     // A place holder to be found
-    return std::make_unique<Network::MockFilterChain>();
+    return std::make_shared<Network::MockFilterChain>();
   }
 };
 
@@ -67,6 +67,10 @@ public:
     return remote_address_;
   }
 
+  const Network::Address::InstanceConstSharedPtr& directRemoteAddress() const override {
+    return remote_address_;
+  }
+
   const Network::Address::InstanceConstSharedPtr& localAddress() const override {
     return local_address_;
   }
@@ -85,8 +89,10 @@ public:
   // Dummy method
   void close() override {}
   bool isOpen() const override { return false; }
-  Network::Address::SocketType socketType() const override {
-    return Network::Address::SocketType::Stream;
+  Network::Socket::Type socketType() const override { return Network::Socket::Type::Stream; }
+  Network::Address::Type addressType() const override { return local_address_->type(); }
+  absl::optional<Network::Address::IpVersion> ipVersion() const override {
+    return Network::Address::IpVersion::v4;
   }
   void setLocalAddress(const Network::Address::InstanceConstSharedPtr&) override {}
   void restoreLocalAddress(const Network::Address::InstanceConstSharedPtr&) override {}
@@ -98,6 +104,19 @@ public:
   void addOptions(const OptionsSharedPtr&) override {}
   const OptionsSharedPtr& options() const override { return options_; }
   void setRequestedServerName(absl::string_view) override {}
+  Api::SysCallIntResult bind(Network::Address::InstanceConstSharedPtr) override { return {0, 0}; }
+  Api::SysCallIntResult listen(int) override { return {0, 0}; }
+  Api::SysCallIntResult connect(const Network::Address::InstanceConstSharedPtr) override {
+    return {0, 0};
+  }
+  Api::SysCallIntResult setSocketOption(int, int, const void*, socklen_t) override {
+    return {0, 0};
+  }
+  Api::SysCallIntResult getSocketOption(int, int, void*, socklen_t*) const override {
+    return {0, 0};
+  }
+  Api::SysCallIntResult setBlockingForTest(bool) override { return {0, 0}; }
+  absl::optional<std::chrono::milliseconds> lastRoundTripTime() override { return {}; }
 
 private:
   Network::IoHandlePtr io_handle_;
@@ -112,13 +131,13 @@ const char YamlHeader[] = R"EOF(
     address:
       socket_address: { address: 127.0.0.1, port_value: 1234 }
     listener_filters:
-    - name: "envoy.listener.tls_inspector"
+    - name: "envoy.filters.listener.tls_inspector"
       config: {}
     filter_chains:
     - filter_chain_match:
         # empty
       transport_socket:
-        name: envoy.transport_sockets.tls
+        name: tls
         typed_config:
           "@type": type.googleapis.com/envoy.api.v2.auth.DownstreamTlsContext
           common_tls_context:
@@ -133,7 +152,7 @@ const char YamlSingleServer[] = R"EOF(
         server_names: "server1.example.com"
         transport_protocol: "tls"
       transport_socket:
-        name: envoy.transport_sockets.tls
+        name: tls
         typed_config:
           "@type": type.googleapis.com/envoy.api.v2.auth.DownstreamTlsContext
           common_tls_context:
@@ -148,7 +167,7 @@ const char YamlSingleDstPortTop[] = R"EOF(
         destination_port: )EOF";
 const char YamlSingleDstPortBottom[] = R"EOF(
       transport_socket:
-        name: envoy.transport_sockets.tls
+        name: tls
         typed_config:
           "@type": type.googleapis.com/envoy.api.v2.auth.DownstreamTlsContext
           common_tls_context:
@@ -160,10 +179,9 @@ const char YamlSingleDstPortBottom[] = R"EOF(
             - filename: "{{ test_rundir }}/test/extensions/transport_sockets/tls/test_data/ticket_key_a")EOF";
 } // namespace
 
-class FilterChainBenchmarkFixture : public benchmark::Fixture {
+class FilterChainBenchmarkFixture : public ::benchmark::Fixture {
 public:
-  using Fixture::SetUp;
-  void SetUp(const ::benchmark::State& state) override {
+  void initialize(::benchmark::State& state) {
     int64_t input_size = state.range(0);
     std::vector<std::string> port_chains;
     port_chains.reserve(input_size);
@@ -176,27 +194,43 @@ public:
     TestUtility::loadFromYaml(listener_yaml_config_, listener_config_);
     filter_chains_ = listener_config_.filter_chains();
   }
-  absl::Span<const envoy::config::listener::v3::FilterChain* const> filter_chains_;
+
+  Envoy::Thread::MutexBasicLockable lock_;
+  Logger::Context logging_state_{spdlog::level::warn, Logger::Logger::DEFAULT_LOG_FORMAT, lock_,
+                                 false};
   std::string listener_yaml_config_;
   envoy::config::listener::v3::Listener listener_config_;
+  absl::Span<const envoy::config::listener::v3::FilterChain* const> filter_chains_;
   MockFilterChainFactoryBuilder dummy_builder_;
-  NiceMock<Server::Configuration::MockFactoryContext> factory_context;
-  FilterChainManagerImpl filter_chain_manager_{
-      std::make_shared<Network::Address::Ipv4Instance>("127.0.0.1", 1234), factory_context};
+  Init::ManagerImpl init_manager_{"fcm_benchmark"};
 };
 
+// NOLINTNEXTLINE(readability-redundant-member-init)
 BENCHMARK_DEFINE_F(FilterChainBenchmarkFixture, FilterChainManagerBuildTest)
 (::benchmark::State& state) {
+  if (benchmark::skipExpensiveBenchmarks() && state.range(0) > 64) {
+    state.SkipWithError("Skipping expensive benchmark");
+    return;
+  }
+
+  initialize(state);
   NiceMock<Server::Configuration::MockFactoryContext> factory_context;
   for (auto _ : state) {
     FilterChainManagerImpl filter_chain_manager{
-        std::make_shared<Network::Address::Ipv4Instance>("127.0.0.1", 1234), factory_context};
+        std::make_shared<Network::Address::Ipv4Instance>("127.0.0.1", 1234), factory_context,
+        init_manager_};
     filter_chain_manager.addFilterChain(filter_chains_, dummy_builder_, filter_chain_manager);
   }
 }
 
 BENCHMARK_DEFINE_F(FilterChainBenchmarkFixture, FilterChainFindTest)
 (::benchmark::State& state) {
+  if (benchmark::skipExpensiveBenchmarks() && state.range(0) > 64) {
+    state.SkipWithError("Skipping expensive benchmark");
+    return;
+  }
+
+  initialize(state);
   std::vector<MockConnectionSocket> sockets;
   sockets.reserve(state.range(0));
   for (int i = 0; i < state.range(0); i++) {
@@ -205,7 +239,8 @@ BENCHMARK_DEFINE_F(FilterChainBenchmarkFixture, FilterChainFindTest)
   }
   NiceMock<Server::Configuration::MockFactoryContext> factory_context;
   FilterChainManagerImpl filter_chain_manager{
-      std::make_shared<Network::Address::Ipv4Instance>("127.0.0.1", 1234), factory_context};
+      std::make_shared<Network::Address::Ipv4Instance>("127.0.0.1", 1234), factory_context,
+      init_manager_};
 
   filter_chain_manager.addFilterChain(filter_chains_, dummy_builder_, filter_chain_manager);
   for (auto _ : state) {
@@ -218,12 +253,14 @@ BENCHMARK_REGISTER_F(FilterChainBenchmarkFixture, FilterChainManagerBuildTest)
     ->Ranges({
         // scale of the chains
         {1, 4096},
-    });
+    })
+    ->Unit(::benchmark::kMillisecond);
 BENCHMARK_REGISTER_F(FilterChainBenchmarkFixture, FilterChainFindTest)
     ->Ranges({
         // scale of the chains
         {1, 4096},
-    });
+    })
+    ->Unit(::benchmark::kMillisecond);
 
 /*
 clang-format off
@@ -238,19 +275,18 @@ Load Average: 19.05, 9.89, 3.92
 -------------------------------------------------------------------------------------------------------
 Benchmark                                                             Time             CPU   Iterations
 -------------------------------------------------------------------------------------------------------
-FilterChainBenchmarkFixture/FilterChainManagerBuildTest/1         51002 ns        50998 ns        12033
-FilterChainBenchmarkFixture/FilterChainManagerBuildTest/8        205175 ns       205161 ns         3782
-FilterChainBenchmarkFixture/FilterChainManagerBuildTest/64      1400449 ns      1400328 ns          485
-FilterChainBenchmarkFixture/FilterChainManagerBuildTest/512    10488106 ns     10485949 ns           62
-FilterChainBenchmarkFixture/FilterChainManagerBuildTest/4096  118373326 ns    117786871 ns            7
-FilterChainBenchmarkFixture/FilterChainFindTest/1                   209 ns          209 ns      3257004
-FilterChainBenchmarkFixture/FilterChainFindTest/8                  1780 ns         1780 ns       391501
-FilterChainBenchmarkFixture/FilterChainFindTest/64                16707 ns        16705 ns        42110
-FilterChainBenchmarkFixture/FilterChainFindTest/512              150220 ns       150072 ns         4675
-FilterChainBenchmarkFixture/FilterChainFindTest/4096            2227852 ns      2227703 ns          320
+FilterChainBenchmarkFixture/FilterChainManagerBuildTest/1        136994 ns       134510 ns         5183
+FilterChainBenchmarkFixture/FilterChainManagerBuildTest/8        583649 ns       574596 ns         1207
+FilterChainBenchmarkFixture/FilterChainManagerBuildTest/64      4483799 ns      4419618 ns          157
+FilterChainBenchmarkFixture/FilterChainManagerBuildTest/512    38864048 ns     38340468 ns           19
+FilterChainBenchmarkFixture/FilterChainManagerBuildTest/4096  318686843 ns    318568578 ns            2
+FilterChainBenchmarkFixture/FilterChainFindTest/1                   201 ns          201 ns      3494470
+FilterChainBenchmarkFixture/FilterChainFindTest/8                  1592 ns         1592 ns       435045
+FilterChainBenchmarkFixture/FilterChainFindTest/64                16057 ns        16053 ns        44275
+FilterChainBenchmarkFixture/FilterChainFindTest/512              172423 ns       172269 ns         4253
+FilterChainBenchmarkFixture/FilterChainFindTest/4096            2676478 ns      2676167 ns          254
 
 clang-format on
 */
 } // namespace Server
 } // namespace Envoy
-BENCHMARK_MAIN();

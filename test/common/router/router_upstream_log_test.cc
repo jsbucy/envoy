@@ -1,4 +1,5 @@
 #include <ctime>
+#include <memory>
 #include <regex>
 
 #include "envoy/config/accesslog/v3/accesslog.pb.h"
@@ -17,8 +18,7 @@
 #include "test/mocks/network/mocks.h"
 #include "test/mocks/router/mocks.h"
 #include "test/mocks/runtime/mocks.h"
-#include "test/mocks/server/mocks.h"
-#include "test/mocks/upstream/mocks.h"
+#include "test/mocks/server/factory_context.h"
 #include "test/test_common/utility.h"
 
 #include "absl/types/optional.h"
@@ -61,9 +61,9 @@ public:
 
   // Filter
   RetryStatePtr createRetryState(const RetryPolicy&, Http::RequestHeaderMap&,
-                                 const Upstream::ClusterInfo&, Runtime::Loader&,
-                                 Runtime::RandomGenerator&, Event::Dispatcher&,
-                                 Upstream::ResourcePriority) override {
+                                 const Upstream::ClusterInfo&, const VirtualCluster*,
+                                 Runtime::Loader&, Random::RandomGenerator&, Event::Dispatcher&,
+                                 TimeSource&, Upstream::ResourcePriority) override {
     EXPECT_EQ(nullptr, retry_state_);
     retry_state_ = new NiceMock<MockRetryState>();
     return RetryStatePtr{retry_state_};
@@ -92,9 +92,9 @@ public:
       current_upstream_log->CopyFrom(upstream_log.value());
     }
 
-    config_.reset(new FilterConfig("prefix.", context_, ShadowWriterPtr(new MockShadowWriter()),
-                                   router_proto));
-    router_.reset(new TestFilter(*config_));
+    config_ = std::make_shared<FilterConfig>("prefix.", context_,
+                                             ShadowWriterPtr(new MockShadowWriter()), router_proto);
+    router_ = std::make_shared<TestFilter>(*config_);
     router_->setDecoderFilterCallbacks(callbacks_);
     EXPECT_CALL(callbacks_.dispatcher_, setTrackedObject(_)).Times(testing::AnyNumber());
 

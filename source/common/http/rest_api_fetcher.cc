@@ -13,7 +13,7 @@ namespace Envoy {
 namespace Http {
 
 RestApiFetcher::RestApiFetcher(Upstream::ClusterManager& cm, const std::string& remote_cluster_name,
-                               Event::Dispatcher& dispatcher, Runtime::RandomGenerator& random,
+                               Event::Dispatcher& dispatcher, Random::RandomGenerator& random,
                                std::chrono::milliseconds refresh_interval,
                                std::chrono::milliseconds request_timeout)
     : remote_cluster_name_(remote_cluster_name), cm_(cm), random_(random),
@@ -28,13 +28,14 @@ RestApiFetcher::~RestApiFetcher() {
 
 void RestApiFetcher::initialize() { refresh(); }
 
-void RestApiFetcher::onSuccess(Http::ResponseMessagePtr&& response) {
+void RestApiFetcher::onSuccess(const Http::AsyncClient::Request& request,
+                               Http::ResponseMessagePtr&& response) {
   uint64_t response_code = Http::Utility::getResponseStatus(response->headers());
   if (response_code == enumToInt(Http::Code::NotModified)) {
     requestComplete();
     return;
   } else if (response_code != enumToInt(Http::Code::OK)) {
-    onFailure(Http::AsyncClient::FailureReason::Reset);
+    onFailure(request, Http::AsyncClient::FailureReason::Reset);
     return;
   }
 
@@ -47,7 +48,8 @@ void RestApiFetcher::onSuccess(Http::ResponseMessagePtr&& response) {
   requestComplete();
 }
 
-void RestApiFetcher::onFailure(Http::AsyncClient::FailureReason reason) {
+void RestApiFetcher::onFailure(const Http::AsyncClient::Request&,
+                               Http::AsyncClient::FailureReason reason) {
   // Currently Http::AsyncClient::FailureReason only has one value: "Reset".
   ASSERT(reason == Http::AsyncClient::FailureReason::Reset);
   onFetchFailure(Config::ConfigUpdateFailureReason::ConnectionFailure, nullptr);

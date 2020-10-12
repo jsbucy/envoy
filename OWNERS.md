@@ -22,6 +22,8 @@ routing PRs, questions, etc. to the right place.
     issues, and CI in general.
 * Snow Pettersen ([snowp](https://github.com/snowp)) (aickck@gmail.com)
   * Upstream, host/priority sets, load balancing, and retry plugins.
+* Greg Greenway ([ggreenway](https://github.com/ggreenway)) (ggreenway@apple.com)
+  * TLS, TCP proxy, listeners, and HTTP proxy/connection pooling.
 
 # Maintainers
 
@@ -35,18 +37,20 @@ routing PRs, questions, etc. to the right place.
   * Lua, access logging, and general miscellany.
 * Joshua Marantz ([jmarantz](https://github.com/jmarantz)) (jmarantz@google.com)
   * Stats, abseil, scalability, and performance.
+* Antonio Vicente ([antoniovicente](https://github.com/antoniovicente)) (avd@google.com)
+  * Event management, security, performance, data plane.
 
 # Envoy security team
 
 * All maintainers
 * Piotr Sikora ([PiotrSikora](https://github.com/PiotrSikora)) (piotrsikora@google.com)
+* Tony Allen ([tonya11en](https://github.com/tonya11en)) (tallen@lyft.com)
 
 # Emeritus maintainers
 
 * Constance Caramanolis ([ccaraman](https://github.com/ccaraman)) (ccaramanolis@lyft.com)
 * Roman Dzhabarov ([RomanDzhabarov](https://github.com/RomanDzhabarov)) (rdzhabarov@lyft.com)
 * Bill Gallagher ([wgallagher](https://github.com/wgallagher)) (bgallagher@lyft.com)
-* Greg Greenway ([ggreenway](https://github.com/ggreenway)) (greg.greenway@gmail.com, formerly ggreenway@apple.com)
 * Dan Noé ([dnoe](https://github.com/dnoe)) (dpn@google.com)
 
 # Friends of Envoy

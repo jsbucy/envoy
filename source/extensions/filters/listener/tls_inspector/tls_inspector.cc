@@ -22,6 +22,10 @@ namespace Extensions {
 namespace ListenerFilters {
 namespace TlsInspector {
 
+// Min/max TLS version recognized by the underlying TLS/SSL library.
+const unsigned Config::TLS_MIN_SUPPORTED_VERSION = TLS1_VERSION;
+const unsigned Config::TLS_MAX_SUPPORTED_VERSION = TLS1_3_VERSION;
+
 Config::Config(Stats::Scope& scope, uint32_t max_client_hello_size)
     : stats_{ALL_TLS_INSPECTOR_STATS(POOL_COUNTER_PREFIX(scope, "tls_inspector."))},
       ssl_ctx_(SSL_CTX_new(TLS_with_buffers_method())),
@@ -32,6 +36,8 @@ Config::Config(Stats::Scope& scope, uint32_t max_client_hello_size)
                                      max_client_hello_size_, size_t(TLS_MAX_CLIENT_HELLO)));
   }
 
+  SSL_CTX_set_min_proto_version(ssl_ctx_.get(), TLS_MIN_SUPPORTED_VERSION);
+  SSL_CTX_set_max_proto_version(ssl_ctx_.get(), TLS_MAX_SUPPORTED_VERSION);
   SSL_CTX_set_options(ssl_ctx_.get(), SSL_OP_NO_TICKET);
   SSL_CTX_set_session_cache_mode(ssl_ctx_.get(), SSL_SESS_CACHE_OFF);
   SSL_CTX_set_select_certificate_cb(
@@ -86,8 +92,8 @@ Network::FilterStatus Filter::onAccept(Network::ListenerFilterCallbacks& cb) {
     return Network::FilterStatus::Continue;
   case ParseState::Continue:
     // do nothing but create the event
-    file_event_ = cb.dispatcher().createFileEvent(
-        socket.ioHandle().fd(),
+    file_event_ = socket.ioHandle().createFileEvent(
+        cb.dispatcher(),
         [this](uint32_t events) {
           if (events & Event::FileReadyType::Closed) {
             config_->stats().connection_closed_.inc();
@@ -109,7 +115,8 @@ Network::FilterStatus Filter::onAccept(Network::ListenerFilterCallbacks& cb) {
             break;
           }
         },
-        Event::FileTriggerType::Edge, Event::FileReadyType::Read | Event::FileReadyType::Closed);
+        Event::PlatformDefaultTriggerType,
+        Event::FileReadyType::Read | Event::FileReadyType::Closed);
     return Network::FilterStatus::StopIteration;
   }
   NOT_REACHED_GCOVR_EXCL_LINE;
@@ -159,14 +166,13 @@ ParseState Filter::onRead() {
   //
   // TODO(ggreenway): write an integration test to ensure the events work as expected on all
   // platforms.
-  auto& os_syscalls = Api::OsSysCallsSingleton::get();
-  const Api::SysCallSizeResult result = os_syscalls.recv(cb_->socket().ioHandle().fd(), buf_,
-                                                         config_->maxClientHelloSize(), MSG_PEEK);
+  const auto result = cb_->socket().ioHandle().recv(buf_, config_->maxClientHelloSize(), MSG_PEEK);
   ENVOY_LOG(trace, "tls inspector: recv: {}", result.rc_);
 
-  if (result.rc_ == -1 && result.errno_ == EAGAIN) {
-    return ParseState::Continue;
-  } else if (result.rc_ < 0) {
+  if (!result.ok()) {
+    if (result.err_->getErrorCode() == Api::IoError::IoErrorCode::Again) {
+      return ParseState::Continue;
+    }
     config_->stats().read_error_.inc();
     return ParseState::Error;
   }

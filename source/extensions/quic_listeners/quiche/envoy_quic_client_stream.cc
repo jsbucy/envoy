@@ -1,17 +1,19 @@
 #include "extensions/quic_listeners/quiche/envoy_quic_client_stream.h"
 
+#if defined(__GNUC__)
 #pragma GCC diagnostic push
-// QUICHE allows unused parameters.
 #pragma GCC diagnostic ignored "-Wunused-parameter"
-// QUICHE uses offsetof().
 #pragma GCC diagnostic ignored "-Winvalid-offsetof"
+#endif
 
 #include "quiche/quic/core/quic_session.h"
 #include "quiche/quic/core/http/quic_header_list.h"
 #include "quiche/spdy/core/spdy_header_block.h"
 #include "extensions/quic_listeners/quiche/platform/quic_mem_slice_span_impl.h"
 
+#if defined(__GNUC__)
 #pragma GCC diagnostic pop
+#endif
 
 #include "extensions/quic_listeners/quiche/envoy_quic_utils.h"
 #include "extensions/quic_listeners/quiche/envoy_quic_client_session.h"
@@ -46,8 +48,18 @@ EnvoyQuicClientStream::EnvoyQuicClientStream(quic::PendingStream* pending,
 
 void EnvoyQuicClientStream::encodeHeaders(const Http::RequestHeaderMap& headers, bool end_stream) {
   ENVOY_STREAM_LOG(debug, "encodeHeaders: (end_stream={}) {}.", *this, end_stream, headers);
+  quic::QuicStream* writing_stream =
+      quic::VersionUsesHttp3(transport_version())
+          ? static_cast<quic::QuicStream*>(this)
+          : (dynamic_cast<quic::QuicSpdySession*>(session())->headers_stream());
+  const uint64_t bytes_to_send_old = writing_stream->BufferedDataBytes();
   WriteHeaders(envoyHeadersToSpdyHeaderBlock(headers), end_stream, nullptr);
   local_end_stream_ = end_stream;
+  const uint64_t bytes_to_send_new = writing_stream->BufferedDataBytes();
+  ASSERT(bytes_to_send_old <= bytes_to_send_new);
+  // IETF QUIC sends HEADER frame on current stream. After writing headers, the
+  // buffer may increase.
+  maybeCheckWatermark(bytes_to_send_old, bytes_to_send_new, *filterManagerConnection());
 }
 
 void EnvoyQuicClientStream::encodeData(Buffer::Instance& data, bool end_stream) {
@@ -55,7 +67,7 @@ void EnvoyQuicClientStream::encodeData(Buffer::Instance& data, bool end_stream) 
                    data.length());
   local_end_stream_ = end_stream;
   // This is counting not serialized bytes in the send buffer.
-  uint64_t bytes_to_send_old = BufferedDataBytes();
+  const uint64_t bytes_to_send_old = BufferedDataBytes();
   // QUIC stream must take all.
   WriteBodySlices(quic::QuicMemSliceSpan(quic::QuicMemSliceSpanImpl(data)), end_stream);
   if (data.length() > 0) {
@@ -64,7 +76,7 @@ void EnvoyQuicClientStream::encodeData(Buffer::Instance& data, bool end_stream) 
     return;
   }
 
-  uint64_t bytes_to_send_new = BufferedDataBytes();
+  const uint64_t bytes_to_send_new = BufferedDataBytes();
   ASSERT(bytes_to_send_old <= bytes_to_send_new);
   maybeCheckWatermark(bytes_to_send_old, bytes_to_send_new, *filterManagerConnection());
 }
@@ -73,7 +85,18 @@ void EnvoyQuicClientStream::encodeTrailers(const Http::RequestTrailerMap& traile
   ASSERT(!local_end_stream_);
   local_end_stream_ = true;
   ENVOY_STREAM_LOG(debug, "encodeTrailers: {}.", *this, trailers);
+  quic::QuicStream* writing_stream =
+      quic::VersionUsesHttp3(transport_version())
+          ? static_cast<quic::QuicStream*>(this)
+          : (dynamic_cast<quic::QuicSpdySession*>(session())->headers_stream());
+
+  const uint64_t bytes_to_send_old = writing_stream->BufferedDataBytes();
   WriteTrailers(envoyHeadersToSpdyHeaderBlock(trailers), nullptr);
+  const uint64_t bytes_to_send_new = writing_stream->BufferedDataBytes();
+  ASSERT(bytes_to_send_old <= bytes_to_send_new);
+  // IETF QUIC sends HEADER frame on current stream. After writing trailers, the
+  // buffer may increase.
+  maybeCheckWatermark(bytes_to_send_old, bytes_to_send_new, *filterManagerConnection());
 }
 
 void EnvoyQuicClientStream::encodeMetadata(const Http::MetadataMapVector& /*metadata_map_vector*/) {

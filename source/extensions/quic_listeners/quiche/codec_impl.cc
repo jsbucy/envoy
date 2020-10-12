@@ -51,8 +51,20 @@ void QuicHttpServerConnectionImpl::onUnderlyingConnectionBelowWriteBufferLowWate
   runWatermarkCallbacksForEachStream(quic_server_session_.stream_map(), false);
 }
 
+void QuicHttpServerConnectionImpl::shutdownNotice() {
+  if (quic::VersionUsesHttp3(quic_server_session_.transport_version())) {
+    quic_server_session_.SendHttp3Shutdown();
+  } else {
+    ENVOY_CONN_LOG(debug, "Shutdown notice is not propagated to QUIC.", quic_server_session_);
+  }
+}
+
 void QuicHttpServerConnectionImpl::goAway() {
-  quic_server_session_.SendGoAway(quic::QUIC_PEER_GOING_AWAY, "server shutdown imminent");
+  if (quic::VersionUsesHttp3(quic_server_session_.transport_version())) {
+    quic_server_session_.SendHttp3GoAway();
+  } else {
+    quic_server_session_.SendGoAway(quic::QUIC_PEER_GOING_AWAY, "server shutdown imminent");
+  }
 }
 
 QuicHttpClientConnectionImpl::QuicHttpClientConnectionImpl(EnvoyQuicClientSession& session,

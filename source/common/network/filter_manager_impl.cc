@@ -13,7 +13,7 @@ void FilterManagerImpl::addWriteFilter(WriteFilterSharedPtr filter) {
   ASSERT(connection_.state() == Connection::State::Open);
   ActiveWriteFilterPtr new_filter(new ActiveWriteFilter{*this, filter});
   filter->initializeWriteFilterCallbacks(*new_filter);
-  new_filter->moveIntoList(std::move(new_filter), downstream_filters_);
+  LinkedList::moveIntoList(std::move(new_filter), downstream_filters_);
 }
 
 void FilterManagerImpl::addFilter(FilterSharedPtr filter) {
@@ -25,7 +25,7 @@ void FilterManagerImpl::addReadFilter(ReadFilterSharedPtr filter) {
   ASSERT(connection_.state() == Connection::State::Open);
   ActiveReadFilterPtr new_filter(new ActiveReadFilter{*this, filter});
   filter->initializeReadFilterCallbacks(*new_filter);
-  new_filter->moveIntoListBack(std::move(new_filter), upstream_filters_);
+  LinkedList::moveIntoListBack(std::move(new_filter), upstream_filters_);
 }
 
 bool FilterManagerImpl::initializeReadFilters() {
@@ -46,6 +46,7 @@ void FilterManagerImpl::onContinueReading(ActiveReadFilter* filter,
 
   std::list<ActiveReadFilterPtr>::iterator entry;
   if (!filter) {
+    connection_.streamInfo().addBytesReceived(buffer_source.getReadBuffer().buffer.length());
     entry = upstream_filters_.begin();
   } else {
     entry = std::next(filter->entry());
@@ -100,6 +101,8 @@ FilterStatus FilterManagerImpl::onWrite(ActiveWriteFilter* filter,
     }
   }
 
+  // Report the final bytes written to the wire
+  connection_.streamInfo().addBytesSent(buffer_source.getWriteBuffer().buffer.length());
   return FilterStatus::Continue;
 }
 

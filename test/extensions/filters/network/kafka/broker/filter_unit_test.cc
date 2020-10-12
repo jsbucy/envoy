@@ -1,7 +1,9 @@
+#include "envoy/event/timer.h"
+
 #include "extensions/filters/network/kafka/broker/filter.h"
 #include "extensions/filters/network/kafka/external/requests.h"
 
-#include "test/mocks/server/mocks.h"
+#include "test/mocks/network/mocks.h"
 #include "test/mocks/stats/mocks.h"
 
 #include "gmock/gmock.h"
@@ -104,7 +106,7 @@ protected:
   }
 };
 
-TEST_F(KafkaBrokerFilterUnitTest, shouldAcceptDataSentByKafkaClient) {
+TEST_F(KafkaBrokerFilterUnitTest, ShouldAcceptDataSentByKafkaClient) {
   // given
   Buffer::OwnedImpl data;
   EXPECT_CALL(*request_decoder_, onData(_));
@@ -118,7 +120,7 @@ TEST_F(KafkaBrokerFilterUnitTest, shouldAcceptDataSentByKafkaClient) {
   // Also, request_decoder got invoked.
 }
 
-TEST_F(KafkaBrokerFilterUnitTest, shouldStopIterationIfProcessingDataFromKafkaClientFails) {
+TEST_F(KafkaBrokerFilterUnitTest, ShouldStopIterationIfProcessingDataFromKafkaClientFails) {
   // given
   Buffer::OwnedImpl data;
   EXPECT_CALL(*request_decoder_, onData(_)).WillOnce(Throw(EnvoyException("boom")));
@@ -133,7 +135,7 @@ TEST_F(KafkaBrokerFilterUnitTest, shouldStopIterationIfProcessingDataFromKafkaCl
   ASSERT_EQ(result, Network::FilterStatus::StopIteration);
 }
 
-TEST_F(KafkaBrokerFilterUnitTest, shouldAcceptDataSentByKafkaBroker) {
+TEST_F(KafkaBrokerFilterUnitTest, ShouldAcceptDataSentByKafkaBroker) {
   // given
   Buffer::OwnedImpl data;
   EXPECT_CALL(*response_decoder_, onData(_));
@@ -147,7 +149,7 @@ TEST_F(KafkaBrokerFilterUnitTest, shouldAcceptDataSentByKafkaBroker) {
   // Also, request_decoder got invoked.
 }
 
-TEST_F(KafkaBrokerFilterUnitTest, shouldStopIterationIfProcessingDataFromKafkaBrokerFails) {
+TEST_F(KafkaBrokerFilterUnitTest, ShouldStopIterationIfProcessingDataFromKafkaBrokerFails) {
   // given
   Buffer::OwnedImpl data;
   EXPECT_CALL(*response_decoder_, onData(_)).WillOnce(Throw(EnvoyException("boom")));
@@ -168,7 +170,7 @@ protected:
   Forwarder testee_{*response_decoder_};
 };
 
-TEST_F(ForwarderUnitTest, shouldUpdateResponseDecoderState) {
+TEST_F(ForwarderUnitTest, ShouldUpdateResponseDecoderState) {
   // given
   const int16_t api_key = 42;
   const int16_t api_version = 13;
@@ -184,7 +186,7 @@ TEST_F(ForwarderUnitTest, shouldUpdateResponseDecoderState) {
   // then - response_decoder_ had a new expected response registered.
 }
 
-TEST_F(ForwarderUnitTest, shouldUpdateResponseDecoderStateOnFailedParse) {
+TEST_F(ForwarderUnitTest, ShouldUpdateResponseDecoderStateOnFailedParse) {
   // given
   const int16_t api_key = 42;
   const int16_t api_version = 13;
@@ -210,7 +212,7 @@ protected:
   KafkaMetricsFacadeImpl testee_{time_source_, request_metrics_, response_metrics_};
 };
 
-TEST_F(KafkaMetricsFacadeImplUnitTest, shouldRegisterRequest) {
+TEST_F(KafkaMetricsFacadeImplUnitTest, ShouldRegisterRequest) {
   // given
   const int16_t api_key = 42;
   const int32_t correlation_id = 1234;
@@ -218,7 +220,7 @@ TEST_F(KafkaMetricsFacadeImplUnitTest, shouldRegisterRequest) {
 
   EXPECT_CALL(*request_metrics_, onRequest(api_key));
 
-  MonotonicTime time_point{MonotonicTime::duration(1234)};
+  MonotonicTime time_point{Event::TimeSystem::Milliseconds(1234)};
   EXPECT_CALL(time_source_, monotonicTime()).WillOnce(Return(time_point));
 
   // when
@@ -229,7 +231,7 @@ TEST_F(KafkaMetricsFacadeImplUnitTest, shouldRegisterRequest) {
   ASSERT_EQ(request_arrivals.at(correlation_id), time_point);
 }
 
-TEST_F(KafkaMetricsFacadeImplUnitTest, shouldRegisterUnknownRequest) {
+TEST_F(KafkaMetricsFacadeImplUnitTest, ShouldRegisterUnknownRequest) {
   // given
   RequestHeader header = {0, 0, 0, ""};
   RequestParseFailureSharedPtr unknown_request = std::make_shared<RequestParseFailure>(header);
@@ -242,16 +244,16 @@ TEST_F(KafkaMetricsFacadeImplUnitTest, shouldRegisterUnknownRequest) {
   // then - request_metrics_ is updated.
 }
 
-TEST_F(KafkaMetricsFacadeImplUnitTest, shouldRegisterResponse) {
+TEST_F(KafkaMetricsFacadeImplUnitTest, ShouldRegisterResponse) {
   // given
   const int16_t api_key = 42;
   const int32_t correlation_id = 1234;
   AbstractResponseSharedPtr response = std::make_shared<MockResponse>(api_key, correlation_id);
 
-  MonotonicTime request_time_point{MonotonicTime::duration(1234000000)};
+  MonotonicTime request_time_point{Event::TimeSystem::Milliseconds(1234)};
   testee_.getRequestArrivalsForTest()[correlation_id] = request_time_point;
 
-  MonotonicTime response_time_point{MonotonicTime::duration(2345000000)};
+  MonotonicTime response_time_point{Event::TimeSystem::Milliseconds(2345)};
 
   EXPECT_CALL(*response_metrics_, onResponse(api_key, 1111));
   EXPECT_CALL(time_source_, monotonicTime()).WillOnce(Return(response_time_point));
@@ -264,7 +266,7 @@ TEST_F(KafkaMetricsFacadeImplUnitTest, shouldRegisterResponse) {
   ASSERT_EQ(request_arrivals.find(correlation_id), request_arrivals.end());
 }
 
-TEST_F(KafkaMetricsFacadeImplUnitTest, shouldRegisterUnknownResponse) {
+TEST_F(KafkaMetricsFacadeImplUnitTest, ShouldRegisterUnknownResponse) {
   // given
   ResponseMetadataSharedPtr unknown_response = std::make_shared<ResponseMetadata>(0, 0, 0);
 

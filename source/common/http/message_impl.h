@@ -19,32 +19,21 @@ template <class HeadersInterfaceType, class HeadersImplType, class TrailersInter
           class TrailersImplType>
 class MessageImpl : public Message<HeadersInterfaceType, TrailersInterfaceType> {
 public:
-  MessageImpl() : headers_(std::make_unique<HeadersImplType>()) {}
+  MessageImpl() : headers_(HeadersImplType::create()) {}
   MessageImpl(std::unique_ptr<HeadersInterfaceType>&& headers) : headers_(std::move(headers)) {}
 
   // Http::Message
   HeadersInterfaceType& headers() override { return *headers_; }
-  Buffer::InstancePtr& body() override { return body_; }
+  Buffer::Instance& body() override { return body_; }
   TrailersInterfaceType* trailers() override { return trailers_.get(); }
   void trailers(std::unique_ptr<TrailersInterfaceType>&& trailers) override {
     trailers_ = std::move(trailers);
   }
-  std::string bodyAsString() const override {
-    std::string ret;
-    if (body_) {
-      uint64_t num_slices = body_->getRawSlices(nullptr, 0);
-      absl::FixedArray<Buffer::RawSlice> slices(num_slices);
-      body_->getRawSlices(slices.begin(), num_slices);
-      for (const Buffer::RawSlice& slice : slices) {
-        ret.append(reinterpret_cast<const char*>(slice.mem_), slice.len_);
-      }
-    }
-    return ret;
-  }
+  std::string bodyAsString() const override { return body_.toString(); }
 
 private:
   std::unique_ptr<HeadersInterfaceType> headers_;
-  Buffer::InstancePtr body_;
+  Buffer::OwnedImpl body_;
   std::unique_ptr<TrailersInterfaceType> trailers_;
 };
 

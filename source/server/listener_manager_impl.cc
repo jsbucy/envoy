@@ -7,6 +7,8 @@
 #include "envoy/config/core/v3/base.pb.h"
 #include "envoy/config/listener/v3/listener.pb.h"
 #include "envoy/config/listener/v3/listener_components.pb.h"
+#include "envoy/network/filter.h"
+#include "envoy/network/listener.h"
 #include "envoy/registry/registry.h"
 #include "envoy/server/active_udp_listener_config.h"
 #include "envoy/server/transport_socket_config.h"
@@ -16,6 +18,7 @@
 #include "common/common/fmt.h"
 #include "common/config/utility.h"
 #include "common/config/version_converter.h"
+#include "common/network/filter_matcher.h"
 #include "common/network/io_socket_handle_impl.h"
 #include "common/network/listen_socket_impl.h"
 #include "common/network/socket_option_factory.h"
@@ -36,11 +39,11 @@ namespace Envoy {
 namespace Server {
 namespace {
 
-std::string toString(Network::Address::SocketType socket_type) {
+std::string toString(Network::Socket::Type socket_type) {
   switch (socket_type) {
-  case Network::Address::SocketType::Stream:
+  case Network::Socket::Type::Stream:
     return "SocketType::Stream";
-  case Network::Address::SocketType::Datagram:
+  case Network::Socket::Type::Datagram:
     return "SocketType::Datagram";
   }
   NOT_REACHED_GCOVR_EXCL_LINE;
@@ -104,7 +107,7 @@ std::vector<Network::FilterFactoryCb> ProdListenerComponentFactory::createNetwor
         Config::Utility::getAndCheckFactory<Configuration::NamedNetworkFilterConfigFactory>(
             proto_config);
 
-    Config::Utility::validateTerminalFilters(filters[i].name(), "network",
+    Config::Utility::validateTerminalFilters(filters[i].name(), factory.name(), "network",
                                              factory.isTerminalFilter(), i == filters.size() - 1);
 
     auto message = Config::Utility::translateToFactoryConfig(
@@ -139,7 +142,8 @@ ProdListenerComponentFactory::createListenerFilterFactoryList_(
             proto_config);
     auto message = Config::Utility::translateToFactoryConfig(
         proto_config, context.messageValidationVisitor(), factory);
-    ret.push_back(factory.createFilterFactoryFromProto(*message, context));
+    ret.push_back(factory.createListenerFilterFactoryFromProto(
+        *message, createListenerFilterMatcher(proto_config), context));
   }
   return ret;
 }
@@ -173,22 +177,28 @@ ProdListenerComponentFactory::createUdpListenerFilterFactoryList_(
   return ret;
 }
 
+Network::ListenerFilterMatcherSharedPtr ProdListenerComponentFactory::createListenerFilterMatcher(
+    const envoy::config::listener::v3::ListenerFilter& listener_filter) {
+  if (!listener_filter.has_filter_disabled()) {
+    return nullptr;
+  }
+  return std::shared_ptr<Network::ListenerFilterMatcher>(
+      Network::ListenerFilterMatcherBuilder::buildListenerFilterMatcher(
+          listener_filter.filter_disabled()));
+}
+
 Network::SocketSharedPtr ProdListenerComponentFactory::createListenSocket(
-    Network::Address::InstanceConstSharedPtr address, Network::Address::SocketType socket_type,
+    Network::Address::InstanceConstSharedPtr address, Network::Socket::Type socket_type,
     const Network::Socket::OptionsSharedPtr& options, const ListenSocketCreationParams& params) {
   ASSERT(address->type() == Network::Address::Type::Ip ||
          address->type() == Network::Address::Type::Pipe);
-  ASSERT(socket_type == Network::Address::SocketType::Stream ||
-         socket_type == Network::Address::SocketType::Datagram);
+  ASSERT(socket_type == Network::Socket::Type::Stream ||
+         socket_type == Network::Socket::Type::Datagram);
 
   // For each listener config we share a single socket among all threaded listeners.
   // First we try to get the socket from our parent if applicable.
   if (address->type() == Network::Address::Type::Pipe) {
-// No such thing as AF_UNIX on Windows
-#ifdef WIN32
-    throw EnvoyException("network type pipe not supported on Windows");
-#else
-    if (socket_type != Network::Address::SocketType::Stream) {
+    if (socket_type != Network::Socket::Type::Stream) {
       // This could be implemented in the future, since Unix domain sockets
       // support SOCK_DGRAM, but there would need to be a way to specify it in
       // envoy.api.v2.core.Pipe.
@@ -203,12 +213,11 @@ Network::SocketSharedPtr ProdListenerComponentFactory::createListenSocket(
       return std::make_shared<Network::UdsListenSocket>(std::move(io_handle), address);
     }
     return std::make_shared<Network::UdsListenSocket>(address);
-#endif
   }
 
-  const std::string scheme = (socket_type == Network::Address::SocketType::Stream)
-                                 ? Network::Utility::TCP_SCHEME
-                                 : Network::Utility::UDP_SCHEME;
+  const std::string scheme = (socket_type == Network::Socket::Type::Stream)
+                                 ? std::string(Network::Utility::TCP_SCHEME)
+                                 : std::string(Network::Utility::UDP_SCHEME);
   const std::string addr = absl::StrCat(scheme, address->asString());
 
   if (params.bind_to_port && params.duplicate_parent_socket) {
@@ -216,7 +225,7 @@ Network::SocketSharedPtr ProdListenerComponentFactory::createListenSocket(
     if (fd != -1) {
       ENVOY_LOG(debug, "obtained socket for address {} from parent", addr);
       Network::IoHandlePtr io_handle = std::make_unique<Network::IoSocketHandleImpl>(fd);
-      if (socket_type == Network::Address::SocketType::Stream) {
+      if (socket_type == Network::Socket::Type::Stream) {
         return std::make_shared<Network::TcpListenSocket>(std::move(io_handle), address, options);
       } else {
         return std::make_shared<Network::UdpListenSocket>(std::move(io_handle), address, options);
@@ -224,7 +233,7 @@ Network::SocketSharedPtr ProdListenerComponentFactory::createListenSocket(
     }
   }
 
-  if (socket_type == Network::Address::SocketType::Stream) {
+  if (socket_type == Network::Socket::Type::Stream) {
     return std::make_shared<Network::TcpListenSocket>(address, options, params.bind_to_port);
   } else {
     return std::make_shared<Network::UdpListenSocket>(address, options, params.bind_to_port);
@@ -235,6 +244,11 @@ DrainManagerPtr ProdListenerComponentFactory::createDrainManager(
     envoy::config::listener::v3::Listener::DrainType drain_type) {
   return DrainManagerPtr{new DrainManagerImpl(server_, drain_type)};
 }
+
+DrainingFilterChainsManager::DrainingFilterChainsManager(ListenerImplPtr&& draining_listener,
+                                                         uint64_t workers_pending_removal)
+    : draining_listener_(std::move(draining_listener)),
+      workers_pending_removal_(workers_pending_removal) {}
 
 ListenerManagerImpl::ListenerManagerImpl(Instance& server,
                                          ListenerComponentFactory& listener_factory,
@@ -247,7 +261,7 @@ ListenerManagerImpl::ListenerManagerImpl(Instance& server,
       enable_dispatcher_stats_(enable_dispatcher_stats) {
   for (uint32_t i = 0; i < server.options().concurrency(); i++) {
     workers_.emplace_back(
-        worker_factory.createWorker(server.overloadManager(), absl::StrCat("worker_", i)));
+        worker_factory.createWorker(i, server.overloadManager(), absl::StrCat("worker_", i)));
   }
 }
 
@@ -298,11 +312,11 @@ ProtobufTypes::MessagePtr ListenerManagerImpl::dumpListenerConfigs() {
     fillState(*dump_listener, *listener);
   }
 
-  for (const auto& state_and_name : error_state_tracker_) {
+  for (const auto& [error_name, error_state] : error_state_tracker_) {
     DynamicListener* dynamic_listener =
-        getOrCreateDynamicListener(state_and_name.first, *config_dump, listener_map);
+        getOrCreateDynamicListener(error_name, *config_dump, listener_map);
 
-    const envoy::admin::v3::UpdateFailureState& state = *state_and_name.second;
+    const envoy::admin::v3::UpdateFailureState& state = *error_state;
     dynamic_listener->mutable_error_state()->CopyFrom(state);
   }
 
@@ -320,7 +334,11 @@ ListenerManagerStats ListenerManagerImpl::generateStats(Stats::Scope& scope) {
 
 bool ListenerManagerImpl::addOrUpdateListener(const envoy::config::listener::v3::Listener& config,
                                               const std::string& version_info, bool added_via_api) {
-
+  RELEASE_ASSERT(
+      !config.address().has_envoy_internal_address(),
+      fmt::format("listener {} has envoy internal address {}. Internal address cannot be used by "
+                  "listener yet",
+                  config.name(), config.address().envoy_internal_address().DebugString()));
   // TODO(junr03): currently only one ApiListener can be installed via bootstrap to avoid having to
   // build a collection of listeners, and to have to be able to warm and drain the listeners. In the
   // future allow multiple ApiListeners, and allow them to be created via LDS as well as bootstrap.
@@ -341,7 +359,7 @@ bool ListenerManagerImpl::addOrUpdateListener(const envoy::config::listener::v3:
   if (!config.name().empty()) {
     name = config.name();
   } else {
-    name = server_.random().uuid();
+    name = server_.api().randomGenerator().uuid();
   }
 
   auto it = error_state_tracker_.find(name);
@@ -379,6 +397,17 @@ bool ListenerManagerImpl::addOrUpdateListenerInternal(
   auto existing_active_listener = getListenerByName(active_listeners_, name);
   auto existing_warming_listener = getListenerByName(warming_listeners_, name);
 
+  // The listener should be updated back to its original state and the warming listener should be
+  // removed.
+  if (existing_warming_listener != warming_listeners_.end() &&
+      existing_active_listener != active_listeners_.end() &&
+      (*existing_active_listener)->blockUpdate(hash)) {
+    warming_listeners_.erase(existing_warming_listener);
+    updateWarmingActiveGauges();
+    stats_.listener_modified_.inc();
+    return true;
+  }
+
   // Do a quick blocked update check before going further. This check needs to be done against both
   // warming and active.
   if ((existing_warming_listener != warming_listeners_.end() &&
@@ -389,24 +418,46 @@ bool ListenerManagerImpl::addOrUpdateListenerInternal(
     return false;
   }
 
-  ListenerImplPtr new_listener(
-      new ListenerImpl(config, version_info, *this, name, added_via_api, workers_started_, hash,
-                       added_via_api ? server_.messageValidationContext().dynamicValidationVisitor()
-                                     : server_.messageValidationContext().staticValidationVisitor(),
-                       server_.options().concurrency()));
+  ListenerImplPtr new_listener = nullptr;
+
+  // In place filter chain update depends on the active listener at worker.
+  if (existing_active_listener != active_listeners_.end() &&
+      (*existing_active_listener)->supportUpdateFilterChain(config, workers_started_)) {
+    ENVOY_LOG(debug, "use in place update filter chain update path for listener name={} hash={}",
+              name, hash);
+    new_listener =
+        (*existing_active_listener)->newListenerWithFilterChain(config, workers_started_, hash);
+    stats_.listener_in_place_updated_.inc();
+  } else {
+    ENVOY_LOG(debug, "use full listener update path for listener name={} hash={}", name, hash);
+    new_listener =
+        std::make_unique<ListenerImpl>(config, version_info, *this, name, added_via_api,
+                                       workers_started_, hash, server_.options().concurrency());
+  }
+
   ListenerImpl& new_listener_ref = *new_listener;
 
   // We mandate that a listener with the same name must have the same configured address. This
   // avoids confusion during updates and allows us to use the same bound address. Note that in
   // the case of port 0 binding, the new listener will implicitly use the same bound port from
   // the existing listener.
-  if ((existing_warming_listener != warming_listeners_.end() &&
-       *(*existing_warming_listener)->address() != *new_listener->address()) ||
-      (existing_active_listener != active_listeners_.end() &&
-       *(*existing_active_listener)->address() != *new_listener->address())) {
-    const std::string message = fmt::format(
-        "error updating listener: '{}' has a different address '{}' from existing listener", name,
-        new_listener->address()->asString());
+  bool active_listener_exists = false;
+  bool warming_listener_exists = false;
+  if (existing_warming_listener != warming_listeners_.end() &&
+      *(*existing_warming_listener)->address() != *new_listener->address()) {
+    warming_listener_exists = true;
+  }
+  if (existing_active_listener != active_listeners_.end() &&
+      *(*existing_active_listener)->address() != *new_listener->address()) {
+    active_listener_exists = true;
+  }
+  if (active_listener_exists || warming_listener_exists) {
+    const std::string message =
+        fmt::format("error updating listener: '{}' has a different address '{}' from existing "
+                    "listener address '{}'",
+                    name, new_listener->address()->asString(),
+                    warming_listener_exists ? (*existing_warming_listener)->address()->asString()
+                                            : (*existing_active_listener)->address()->asString());
     ENVOY_LOG(warn, "{}", message);
     throw EnvoyException(message);
   }
@@ -448,7 +499,7 @@ bool ListenerManagerImpl::addOrUpdateListenerInternal(
     // We have no warming or active listener so we need to make a new one. What we do depends on
     // whether workers have been started or not. Additionally, search through draining listeners
     // to see if there is a listener that has a socket factory for the same address we are
-    // configured for and doesn't not use SO_REUSEPORT. This is an edge case, but may happen if a
+    // configured for and doesn't use SO_REUSEPORT. This is an edge case, but may happen if a
     // listener is removed and then added back with a same or different name and intended to listen
     // on the same address. This should work and not fail.
     Network::ListenSocketFactorySharedPtr draining_listen_socket_factory;
@@ -465,13 +516,13 @@ bool ListenerManagerImpl::addOrUpdateListenerInternal(
       draining_listen_socket_factory = existing_draining_listener->listener_->getSocketFactory();
     }
 
-    Network::Address::SocketType socket_type =
+    Network::Socket::Type socket_type =
         Network::Utility::protobufAddressSocketType(config.address());
     new_listener->setSocketFactory(
         draining_listen_socket_factory
             ? draining_listen_socket_factory
             : createListenSocketFactory(config.address(), *new_listener,
-                                        (socket_type == Network::Address::SocketType::Datagram) ||
+                                        (socket_type == Network::Socket::Type::Datagram) ||
                                             config.reuse_port()));
     if (workers_started_) {
       new_listener->debugLog("add warming listener");
@@ -565,6 +616,17 @@ void ListenerManagerImpl::drainListener(ListenerImplPtr&& listener) {
         // main thread to avoid locking. This makes sure that we don't destroy the listener
         // while filters might still be using its context (stats, etc.).
         server_.dispatcher().post([this, draining_it]() -> void {
+          // TODO(lambdai): Resolve race condition below.
+          // Consider the below events in global sequence order
+          // main thread: calling drainListener
+          // work thread: deferred delete the active connection
+          // work thread: post to main that the drain is done
+          // main thread: erase the listener
+          // worker thread: execute destroying connection when the shared listener config is
+          // destroyed at step 4 (could be worse such as access the connection because connection is
+          // not yet started to deleted). The race condition is introduced because 3 occurs too
+          // early. My solution is to defer schedule the callback posting to main thread, by
+          // introducing DeferTaskUtil. So that 5 should always happen before 3.
           if (--draining_it->workers_pending_removal_ == 0) {
             draining_it->listener_->debugLog("draining listener removal complete");
             draining_listeners_.erase(draining_it);
@@ -592,50 +654,87 @@ ListenerManagerImpl::getListenerByName(ListenerList& listeners, const std::strin
   return ret;
 }
 
-std::vector<std::reference_wrapper<Network::ListenerConfig>> ListenerManagerImpl::listeners() {
+std::vector<std::reference_wrapper<Network::ListenerConfig>>
+ListenerManagerImpl::listeners(ListenerState state) {
   std::vector<std::reference_wrapper<Network::ListenerConfig>> ret;
-  ret.reserve(active_listeners_.size());
-  for (const auto& listener : active_listeners_) {
-    ret.push_back(*listener);
+
+  size_t size = 0;
+  size += state & WARMING ? warming_listeners_.size() : 0;
+  size += state & ACTIVE ? active_listeners_.size() : 0;
+  size += state & DRAINING ? draining_listeners_.size() : 0;
+  ret.reserve(size);
+
+  if (state & WARMING) {
+    for (const auto& listener : warming_listeners_) {
+      ret.push_back(*listener);
+    }
+  }
+  if (state & ACTIVE) {
+    for (const auto& listener : active_listeners_) {
+      ret.push_back(*listener);
+    }
+  }
+  if (state & DRAINING) {
+    for (const auto& draining_listener : draining_listeners_) {
+      ret.push_back(*(draining_listener.listener_));
+    }
   }
   return ret;
 }
 
-void ListenerManagerImpl::addListenerToWorker(Worker& worker, ListenerImpl& listener,
+void ListenerManagerImpl::addListenerToWorker(Worker& worker,
+                                              absl::optional<uint64_t> overridden_listener,
+                                              ListenerImpl& listener,
                                               ListenerCompletionCallback completion_callback) {
-  worker.addListener(listener, [this, &listener, completion_callback](bool success) -> void {
-    // The add listener completion runs on the worker thread. Post back to the main thread to
-    // avoid locking.
-    server_.dispatcher().post([this, success, &listener, completion_callback]() -> void {
-      // It is theoretically possible for a listener to get added on 1 worker but not the others.
-      // The below check with onListenerCreateFailure() is there to ensure we execute the
-      // removal/logging/stats at most once on failure. Note also that drain/removal can race
-      // with addition. It's guaranteed that workers process remove after add so this should be
-      // fine.
-      if (!success && !listener.onListenerCreateFailure()) {
-        // TODO(mattklein123): In addition to a critical log and a stat, we should consider adding
-        //                     a startup option here to cause the server to exit. I think we
-        //                     probably want this at Lyft but I will do it in a follow up.
-        ENVOY_LOG(critical, "listener '{}' failed to listen on address '{}' on worker",
-                  listener.name(), listener.listenSocketFactory().localAddress()->asString());
-        stats_.listener_create_failure_.inc();
-        removeListener(listener.name());
-      }
-      if (success) {
+  if (overridden_listener.has_value()) {
+    ENVOY_LOG(debug, "replacing existing listener {}", overridden_listener.value());
+    worker.addListener(overridden_listener, listener, [this, completion_callback](bool) -> void {
+      server_.dispatcher().post([this, completion_callback]() -> void {
         stats_.listener_create_success_.inc();
-      }
-      if (completion_callback) {
-        completion_callback();
-      }
+        if (completion_callback) {
+          completion_callback();
+        }
+      });
     });
-  });
+    return;
+  }
+  worker.addListener(
+      overridden_listener, listener, [this, &listener, completion_callback](bool success) -> void {
+        // The add listener completion runs on the worker thread. Post back to the main thread to
+        // avoid locking.
+        server_.dispatcher().post([this, success, &listener, completion_callback]() -> void {
+          // It is possible for a listener to get added on 1 worker but not the others. The below
+          // check with onListenerCreateFailure() is there to ensure we execute the
+          // removal/logging/stats at most once on failure. Note also that drain/removal can race
+          // with addition. It's guaranteed that workers process remove after add so this should be
+          // fine.
+          //
+          // TODO(mattklein123): We should consider rewriting how listener sockets are added to
+          // workers, especially in the case of reuse port. If we were to create all needed
+          // listener sockets on the main thread (even in the case of reuse port) we could catch
+          // almost all socket errors here. This would both greatly simplify the logic and allow
+          // for xDS NACK in most cases.
+          if (!success && !listener.onListenerCreateFailure()) {
+            ENVOY_LOG(error, "listener '{}' failed to listen on address '{}' on worker",
+                      listener.name(), listener.listenSocketFactory().localAddress()->asString());
+            stats_.listener_create_failure_.inc();
+            removeListenerInternal(listener.name(), false);
+          }
+          if (success) {
+            stats_.listener_create_success_.inc();
+          }
+          if (completion_callback) {
+            completion_callback();
+          }
+        });
+      });
 }
 
 void ListenerManagerImpl::onListenerWarmed(ListenerImpl& listener) {
   // The warmed listener should be added first so that the worker will accept new connections
   // when it stops listening on the old listener.
   for (const auto& worker : workers_) {
-    addListenerToWorker(*worker, listener, nullptr);
+    addListenerToWorker(*worker, absl::nullopt, listener, nullptr);
   }
 
   auto existing_active_listener = getListenerByName(active_listeners_, listener.name());
@@ -656,6 +755,83 @@ void ListenerManagerImpl::onListenerWarmed(ListenerImpl& listener) {
   updateWarmingActiveGauges();
 }
 
+void ListenerManagerImpl::inPlaceFilterChainUpdate(ListenerImpl& listener) {
+  auto existing_active_listener = getListenerByName(active_listeners_, listener.name());
+  auto existing_warming_listener = getListenerByName(warming_listeners_, listener.name());
+  ASSERT(existing_warming_listener != warming_listeners_.end());
+  ASSERT(*existing_warming_listener != nullptr);
+
+  (*existing_warming_listener)->debugLog("execute in place filter chain update");
+
+  // Now that in place filter chain update was decided, the replaced listener must be in active
+  // list. It requires stop/remove listener procedure cancelling the in placed update if any.
+  ASSERT(existing_active_listener != active_listeners_.end());
+  ASSERT(*existing_active_listener != nullptr);
+
+  for (const auto& worker : workers_) {
+    // Explicitly override the existing listener with a new listener config.
+    addListenerToWorker(*worker, listener.listenerTag(), listener, nullptr);
+  }
+
+  auto previous_listener = std::move(*existing_active_listener);
+  *existing_active_listener = std::move(*existing_warming_listener);
+  // Finish active_listeners_ transformation before calling `drainFilterChains` as it depends on
+  // their state.
+  drainFilterChains(std::move(previous_listener), **existing_active_listener);
+
+  warming_listeners_.erase(existing_warming_listener);
+  updateWarmingActiveGauges();
+}
+
+void ListenerManagerImpl::drainFilterChains(ListenerImplPtr&& draining_listener,
+                                            ListenerImpl& new_listener) {
+  // First add the listener to the draining list.
+  std::list<DrainingFilterChainsManager>::iterator draining_group =
+      draining_filter_chains_manager_.emplace(draining_filter_chains_manager_.begin(),
+                                              std::move(draining_listener), workers_.size());
+  draining_group->getDrainingListener().diffFilterChain(
+      new_listener, [&draining_group](Network::DrainableFilterChain& filter_chain) mutable {
+        filter_chain.startDraining();
+        draining_group->addFilterChainToDrain(filter_chain);
+      });
+  auto filter_chain_size = draining_group->numDrainingFilterChains();
+  stats_.total_filter_chains_draining_.add(filter_chain_size);
+  draining_group->getDrainingListener().debugLog(
+      absl::StrCat("draining ", filter_chain_size, " filter chains in listener ",
+                   draining_group->getDrainingListener().name()));
+
+  // Start the drain sequence which completes when the listener's drain manager has completed
+  // draining at whatever the server configured drain times are.
+  draining_group->startDrainSequence(
+      server_.options().drainTime(), server_.dispatcher(), [this, draining_group]() -> void {
+        draining_group->getDrainingListener().debugLog(
+            absl::StrCat("removing draining filter chains from listener ",
+                         draining_group->getDrainingListener().name()));
+        for (const auto& worker : workers_) {
+          // Once the drain time has completed via the drain manager's timer, we tell the workers
+          // to remove the filter chains.
+          worker->removeFilterChains(
+              draining_group->getDrainingListenerTag(), draining_group->getDrainingFilterChains(),
+              [this, draining_group]() -> void {
+                // The remove listener completion is called on the worker thread. We post back to
+                // the main thread to avoid locking. This makes sure that we don't destroy the
+                // listener while filters might still be using its context (stats, etc.).
+                server_.dispatcher().post([this, draining_group]() -> void {
+                  if (draining_group->decWorkersPendingRemoval() == 0) {
+                    draining_group->getDrainingListener().debugLog(
+                        absl::StrCat("draining filter chains from listener ",
+                                     draining_group->getDrainingListener().name(), " complete"));
+                    stats_.total_filter_chains_draining_.sub(
+                        draining_group->numDrainingFilterChains());
+                    draining_filter_chains_manager_.erase(draining_group);
+                  }
+                });
+              });
+        }
+      });
+  updateWarmingActiveGauges();
+}
+
 uint64_t ListenerManagerImpl::numConnections() const {
   uint64_t num_connections = 0;
   for (const auto& worker : workers_) {
@@ -666,14 +842,19 @@ uint64_t ListenerManagerImpl::numConnections() const {
 }
 
 bool ListenerManagerImpl::removeListener(const std::string& name) {
+  return removeListenerInternal(name, true);
+}
+
+bool ListenerManagerImpl::removeListenerInternal(const std::string& name,
+                                                 bool dynamic_listeners_only) {
   ENVOY_LOG(debug, "begin remove listener: name={}", name);
 
   auto existing_active_listener = getListenerByName(active_listeners_, name);
   auto existing_warming_listener = getListenerByName(warming_listeners_, name);
   if ((existing_warming_listener == warming_listeners_.end() ||
-       (*existing_warming_listener)->blockRemove()) &&
+       (dynamic_listeners_only && (*existing_warming_listener)->blockRemove())) &&
       (existing_active_listener == active_listeners_.end() ||
-       (*existing_active_listener)->blockRemove())) {
+       (dynamic_listeners_only && (*existing_active_listener)->blockRemove()))) {
     ENVOY_LOG(debug, "unknown/locked listener '{}'. no remove", name);
     return false;
   }
@@ -718,7 +899,7 @@ void ListenerManagerImpl::startWorkers(GuardDog& guard_dog) {
     ENVOY_LOG(debug, "starting worker {}", i);
     ASSERT(warming_listeners_.empty());
     for (const auto& listener : active_listeners_) {
-      addListenerToWorker(*worker, *listener, [this, listeners_pending_init]() {
+      addListenerToWorker(*worker, absl::nullopt, *listener, [this, listeners_pending_init]() {
         if (--(*listeners_pending_init) == 0) {
           stats_.workers_started_.set(1);
         }
@@ -726,11 +907,11 @@ void ListenerManagerImpl::startWorkers(GuardDog& guard_dog) {
     }
     worker->start(guard_dog);
     if (enable_dispatcher_stats_) {
-      worker->initializeStats(*scope_, fmt::format("worker_{}.", i));
+      worker->initializeStats(*scope_);
     }
     i++;
   }
-  if (active_listeners_.size() == 0) {
+  if (active_listeners_.empty()) {
     stats_.workers_started_.set(1);
   }
 }
@@ -797,8 +978,8 @@ void ListenerManagerImpl::endListenerUpdate(FailureStates&& failure_states) {
 ListenerFilterChainFactoryBuilder::ListenerFilterChainFactoryBuilder(
     ListenerImpl& listener,
     Server::Configuration::TransportSocketFactoryContextImpl& factory_context)
-    : ListenerFilterChainFactoryBuilder(listener.messageValidationVisitor(),
-                                        listener.parent_.factory_, factory_context) {}
+    : ListenerFilterChainFactoryBuilder(listener.validation_visitor_, listener.parent_.factory_,
+                                        factory_context) {}
 
 ListenerFilterChainFactoryBuilder::ListenerFilterChainFactoryBuilder(
     ProtobufMessage::ValidationVisitor& validator,
@@ -807,16 +988,16 @@ ListenerFilterChainFactoryBuilder::ListenerFilterChainFactoryBuilder(
     : validator_(validator), listener_component_factory_(listener_component_factory),
       factory_context_(factory_context) {}
 
-std::unique_ptr<Network::FilterChain> ListenerFilterChainFactoryBuilder::buildFilterChain(
+Network::DrainableFilterChainSharedPtr ListenerFilterChainFactoryBuilder::buildFilterChain(
     const envoy::config::listener::v3::FilterChain& filter_chain,
     FilterChainFactoryContextCreator& context_creator) const {
   return buildFilterChainInternal(filter_chain,
                                   context_creator.createFilterChainFactoryContext(&filter_chain));
 }
 
-std::unique_ptr<Network::FilterChain> ListenerFilterChainFactoryBuilder::buildFilterChainInternal(
+Network::DrainableFilterChainSharedPtr ListenerFilterChainFactoryBuilder::buildFilterChainInternal(
     const envoy::config::listener::v3::FilterChain& filter_chain,
-    Configuration::FilterChainFactoryContext& filter_chain_factory_context) const {
+    Configuration::FilterChainFactoryContextPtr&& filter_chain_factory_context) const {
   // If the cluster doesn't have transport socket configured, then use the default "raw_buffer"
   // transport socket or BoringSSL-based "tls" transport socket if TLS settings are configured.
   // We copy by value first then override if necessary.
@@ -839,18 +1020,20 @@ std::unique_ptr<Network::FilterChain> ListenerFilterChainFactoryBuilder::buildFi
 
   std::vector<std::string> server_names(filter_chain.filter_chain_match().server_names().begin(),
                                         filter_chain.filter_chain_match().server_names().end());
-  return std::make_unique<FilterChainImpl>(
-      config_factory.createTransportSocketFactory(*message, factory_context_,
-                                                  std::move(server_names)),
-      listener_component_factory_.createNetworkFilterFactoryList(filter_chain.filters(),
-                                                                 filter_chain_factory_context));
+
+  auto filter_chain_res =
+      std::make_unique<FilterChainImpl>(config_factory.createTransportSocketFactory(
+                                            *message, factory_context_, std::move(server_names)),
+                                        listener_component_factory_.createNetworkFilterFactoryList(
+                                            filter_chain.filters(), *filter_chain_factory_context));
+  filter_chain_res->setFilterChainFactoryContext(std::move(filter_chain_factory_context));
+  return filter_chain_res;
 }
 
 Network::ListenSocketFactorySharedPtr ListenerManagerImpl::createListenSocketFactory(
     const envoy::config::core::v3::Address& proto_address, ListenerImpl& listener,
     bool reuse_port) {
-  Network::Address::SocketType socket_type =
-      Network::Utility::protobufAddressSocketType(proto_address);
+  Network::Socket::Type socket_type = Network::Utility::protobufAddressSocketType(proto_address);
   return std::make_shared<ListenSocketFactoryImpl>(
       factory_, listener.address(), socket_type, listener.listenSocketOptions(),
       listener.bindToPort(), listener.name(), reuse_port);

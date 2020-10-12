@@ -6,6 +6,7 @@
 #include "envoy/config/route/v3/route_components.pb.h"
 #include "envoy/event/dispatcher.h"
 #include "envoy/http/message.h"
+#include "envoy/stream_info/stream_info.h"
 #include "envoy/tracing/http_tracer.h"
 
 #include "common/protobuf/protobuf.h"
@@ -21,6 +22,19 @@ namespace Http {
 class AsyncClient {
 public:
   /**
+   * An in-flight HTTP request.
+   */
+  class Request {
+  public:
+    virtual ~Request() = default;
+
+    /**
+     * Signals that the request should be cancelled.
+     */
+    virtual void cancel() PURE;
+  };
+
+  /**
    * Async Client failure reasons.
    */
   enum class FailureReason {
@@ -30,6 +44,9 @@ public:
 
   /**
    * Notifies caller of async HTTP request status.
+   *
+   * To support a use case where a caller makes multiple requests in parallel,
+   * individual callback methods provide request context corresponding to that response.
    */
   class Callbacks {
   public:
@@ -37,14 +54,31 @@ public:
 
     /**
      * Called when the async HTTP request succeeds.
+     * @param request  request handle.
+     *                 NOTE: request handle is passed for correlation purposes only, e.g.
+     *                 for client code to be able to exclude that handle from a list of
+     *                 requests in progress.
      * @param response the HTTP response
      */
-    virtual void onSuccess(ResponseMessagePtr&& response) PURE;
+    virtual void onSuccess(const Request& request, ResponseMessagePtr&& response) PURE;
 
     /**
      * Called when the async HTTP request fails.
+     * @param request request handle.
+     *                NOTE: request handle is passed for correlation purposes only, e.g.
+     *                for client code to be able to exclude that handle from a list of
+     *                requests in progress.
+     * @param reason  failure reason
      */
-    virtual void onFailure(FailureReason reason) PURE;
+    virtual void onFailure(const Request& request, FailureReason reason) PURE;
+
+    /**
+     * Called before finalizing upstream span when the request is complete or reset.
+     * @param span a tracing span to fill with extra tags.
+     * @param response_headers the response headers.
+     */
+    virtual void onBeforeFinalizeUpstreamSpan(Envoy::Tracing::Span& span,
+                                              const Http::ResponseHeaderMap* response_headers) PURE;
   };
 
   /**
@@ -93,19 +127,6 @@ public:
   };
 
   /**
-   * An in-flight HTTP request.
-   */
-  class Request {
-  public:
-    virtual ~Request() = default;
-
-    /**
-     * Signals that the request should be cancelled.
-     */
-    virtual void cancel() PURE;
-  };
-
-  /**
    * An in-flight HTTP stream.
    */
   class Stream {
@@ -138,9 +159,22 @@ public:
      * Reset the stream.
      */
     virtual void reset() PURE;
+
+    /***
+     * @returns if the stream has enough buffered outbound data to be over the configured buffer
+     * limits
+     */
+    virtual bool isAboveWriteBufferHighWatermark() const PURE;
   };
 
   virtual ~AsyncClient() = default;
+
+  /**
+   * A context from the caller of an async client.
+   */
+  struct ParentContext {
+    const StreamInfo::StreamInfo* stream_info;
+  };
 
   /**
    * A structure to hold the options for AsyncStream object.
@@ -167,6 +201,10 @@ public:
       hash_policy = v;
       return *this;
     }
+    StreamOptions& setParentContext(const ParentContext& v) {
+      parent_context = v;
+      return *this;
+    }
 
     // For gmock test
     bool operator==(const StreamOptions& src) const {
@@ -189,6 +227,9 @@ public:
 
     // Provides the hash policy for hashing load balancing strategies.
     Protobuf::RepeatedPtrField<envoy::config::route::v3::RouteAction::HashPolicy> hash_policy;
+
+    // Provides parent context. Currently, this holds stream info from the caller.
+    ParentContext parent_context;
   };
 
   /**
@@ -216,6 +257,10 @@ public:
       StreamOptions::setHashPolicy(v);
       return *this;
     }
+    RequestOptions& setParentContext(const ParentContext& v) {
+      StreamOptions::setParentContext(v);
+      return *this;
+    }
     RequestOptions& setParentSpan(Tracing::Span& parent_span) {
       parent_span_ = &parent_span;
       return *this;
@@ -224,11 +269,15 @@ public:
       child_span_name_ = child_span_name;
       return *this;
     }
+    RequestOptions& setSampled(bool sampled) {
+      sampled_ = sampled;
+      return *this;
+    }
 
     // For gmock test
     bool operator==(const RequestOptions& src) const {
       return StreamOptions::operator==(src) && parent_span_ == src.parent_span_ &&
-             child_span_name_ == src.child_span_name_;
+             child_span_name_ == src.child_span_name_ && sampled_ == src.sampled_;
     }
 
     // The parent span that child spans are created under to trace egress requests/responses.
@@ -238,6 +287,8 @@ public:
     // If left empty and parent_span_ is set, then the default name will have the cluster name.
     // Only used if parent_span_ is set.
     std::string child_span_name_{""};
+    // Sampling decision for the tracing span. The span is sampled by default.
+    bool sampled_{true};
   };
 
   /**

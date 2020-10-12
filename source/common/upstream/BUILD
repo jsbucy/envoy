@@ -1,10 +1,10 @@
-licenses(["notice"])  # Apache 2
-
 load(
     "//bazel:envoy_build_system.bzl",
     "envoy_cc_library",
     "envoy_package",
 )
+
+licenses(["notice"])  # Apache 2
 
 envoy_package()
 
@@ -19,7 +19,7 @@ envoy_cc_library(
         "//source/common/common:cleanup_lib",
         "//source/common/common:minimal_logger_lib",
         "//source/common/config:api_version_lib",
-        "//source/common/config:resources_lib",
+        "//source/common/config:subscription_base_interface",
         "//source/common/config:utility_lib",
         "//source/common/protobuf:utility_lib",
         "@envoy_api//envoy/api/v2:pkg_cc_proto",
@@ -71,6 +71,15 @@ envoy_cc_library(
         "@envoy_api//envoy/config/bootstrap/v3:pkg_cc_proto",
         "@envoy_api//envoy/config/cluster/v3:pkg_cc_proto",
         "@envoy_api//envoy/config/core/v3:pkg_cc_proto",
+    ],
+)
+
+envoy_cc_library(
+    name = "cluster_update_tracker_lib",
+    srcs = ["cluster_update_tracker.cc"],
+    hdrs = ["cluster_update_tracker.h"],
+    deps = [
+        "//include/envoy/upstream:cluster_manager_interface",
     ],
 )
 
@@ -166,12 +175,14 @@ envoy_cc_library(
     hdrs = ["load_balancer_impl.h"],
     deps = [
         ":edf_scheduler_lib",
+        "//include/envoy/common:random_generator_interface",
         "//include/envoy/runtime:runtime_interface",
         "//include/envoy/stats:stats_interface",
         "//include/envoy/upstream:load_balancer_interface",
         "//include/envoy/upstream:upstream_interface",
         "//source/common/common:assert_lib",
         "//source/common/protobuf:utility_lib",
+        "//source/common/runtime:runtime_protos_lib",
         "@envoy_api//envoy/config/cluster/v3:pkg_cc_proto",
     ],
 )
@@ -212,6 +223,8 @@ envoy_cc_library(
         "//source/common/config:version_converter_lib",
         "//source/common/grpc:async_client_lib",
         "//source/common/network:resolver_lib",
+        "//source/common/protobuf:message_validator_lib",
+        "//source/common/protobuf:utility_lib",
         "//source/extensions/transport_sockets:well_known_names",
         "//source/server:transport_socket_config_lib",
         "@envoy_api//envoy/config/cluster/v3:pkg_cc_proto",
@@ -301,6 +314,7 @@ envoy_cc_library(
         "//include/envoy/upstream:resource_manager_interface",
         "//include/envoy/upstream:upstream_interface",
         "//source/common/common:assert_lib",
+        "//source/common/common:basic_resource_lib",
     ],
 )
 
@@ -330,6 +344,9 @@ envoy_cc_library(
     name = "ring_hash_lb_lib",
     srcs = ["ring_hash_lb.cc"],
     hdrs = ["ring_hash_lb.h"],
+    external_deps = [
+        "abseil_inlined_vector",
+    ],
     deps = [
         ":thread_aware_lb_lib",
         "//source/common/common:minimal_logger_lib",
@@ -352,7 +369,9 @@ envoy_cc_library(
         "//include/envoy/upstream:cluster_factory_interface",
         "//include/envoy/upstream:locality_lib",
         "//source/common/config:api_version_lib",
+        "//source/common/config:decoded_resource_lib",
         "//source/common/config:metadata_lib",
+        "//source/common/config:subscription_base_interface",
         "//source/common/config:subscription_factory_lib",
         "//source/common/config:utility_lib",
         "//source/common/config:version_converter_lib",
@@ -413,11 +432,15 @@ envoy_cc_library(
         "//include/envoy/ssl:context_interface",
         "//include/envoy/upstream:health_checker_interface",
         "//source/common/common:enum_to_int",
+        "//source/common/common:thread_lib",
         "//source/common/common:utility_lib",
+        "//source/common/http/http1:codec_stats_lib",
+        "//source/common/http/http2:codec_stats_lib",
         "//source/common/http:utility_lib",
         "//source/common/network:address_lib",
         "//source/common/network:resolver_lib",
         "//source/common/network:socket_option_factory_lib",
+        "//source/common/network:socket_option_lib",
         "//source/common/network:utility_lib",
         "//source/common/protobuf",
         "//source/common/protobuf:utility_lib",
@@ -496,6 +519,8 @@ envoy_cc_library(
         "//source/common/common:minimal_logger_lib",
         "//source/common/config:metadata_lib",
         "//source/common/config:well_known_names",
+        "//source/common/http/http1:codec_stats_lib",
+        "//source/common/http/http2:codec_stats_lib",
         "//source/common/init:manager_lib",
         "//source/common/shared_pool:shared_pool_lib",
         "//source/common/stats:isolated_store_lib",

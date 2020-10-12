@@ -4,13 +4,11 @@
 #include "extensions/filters/http/well_known_names.h"
 
 #include "test/extensions/filters/http/jwt_authn/mock.h"
-#include "test/mocks/server/mocks.h"
 #include "test/test_common/utility.h"
 
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
 
-using envoy::extensions::filters::http::jwt_authn::v3::JwtAuthentication;
 using ::google::jwt_verify::Status;
 
 using testing::_;
@@ -111,6 +109,33 @@ TEST_F(FilterTest, CorsPreflight) {
   EXPECT_EQ(0U, mock_config_->stats().denied_.value());
 }
 
+TEST_F(FilterTest, CorsPreflightMssingOrigin) {
+  auto headers = Http::TestRequestHeaderMapImpl{
+      {":method", "OPTIONS"},
+      {":path", "/"},
+      {":scheme", "http"},
+      {":authority", "host"},
+      {"access-control-request-method", "GET"},
+  };
+  EXPECT_EQ(Http::FilterHeadersStatus::Continue, filter_->decodeHeaders(headers, false));
+  EXPECT_EQ(1U, mock_config_->stats().allowed_.value());
+  // Should not be bypassed by cors_preflight since missing origin.
+  EXPECT_EQ(0U, mock_config_->stats().cors_preflight_bypassed_.value());
+  EXPECT_EQ(0U, mock_config_->stats().denied_.value());
+}
+
+TEST_F(FilterTest, CorsPreflightMssingAccessControlRequestMethod) {
+  auto headers = Http::TestRequestHeaderMapImpl{
+      {":method", "OPTIONS"},    {":path", "/"}, {":scheme", "http"}, {":authority", "host"},
+      {"origin", "test-origin"},
+  };
+  EXPECT_EQ(Http::FilterHeadersStatus::Continue, filter_->decodeHeaders(headers, false));
+  EXPECT_EQ(1U, mock_config_->stats().allowed_.value());
+  // Should not be bypassed by cors_preflight since missing access-control-request-method.
+  EXPECT_EQ(0U, mock_config_->stats().cors_preflight_bypassed_.value());
+  EXPECT_EQ(0U, mock_config_->stats().denied_.value());
+}
+
 // This test verifies the setPayload call is handled correctly
 TEST_F(FilterTest, TestSetPayloadCall) {
   setupMockConfig();
@@ -154,7 +179,8 @@ TEST_F(FilterTest, InlineUnauthorizedFailure) {
   Buffer::OwnedImpl data("");
   EXPECT_EQ(Http::FilterDataStatus::Continue, filter_->decodeData(data, false));
   EXPECT_EQ(Http::FilterTrailersStatus::Continue, filter_->decodeTrailers(trailers_));
-  EXPECT_EQ("jwt_authn_access_denied", filter_callbacks_.details_);
+  EXPECT_EQ(filter_callbacks_.details(), "jwt_authn_access_denied{Jwt is not in the form of "
+                                         "Header.Payload.Signature with two dots and 3 sections}");
 }
 
 // This test verifies Verifier::Callback is called inline with a failure(403 Forbidden) status.
@@ -175,7 +201,8 @@ TEST_F(FilterTest, InlineForbiddenFailure) {
   Buffer::OwnedImpl data("");
   EXPECT_EQ(Http::FilterDataStatus::Continue, filter_->decodeData(data, false));
   EXPECT_EQ(Http::FilterTrailersStatus::Continue, filter_->decodeTrailers(trailers_));
-  EXPECT_EQ("jwt_authn_access_denied", filter_callbacks_.details_);
+  EXPECT_EQ(filter_callbacks_.details(),
+            "jwt_authn_access_denied{Audiences in Jwt are not allowed}");
 }
 
 // This test verifies Verifier::Callback is called with OK status after verify().

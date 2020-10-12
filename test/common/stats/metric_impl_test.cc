@@ -1,7 +1,6 @@
 #include <string>
 
 #include "common/stats/allocator_impl.h"
-#include "common/stats/symbol_table_creator.h"
 #include "common/stats/utility.h"
 
 #include "test/test_common/logging.h"
@@ -14,31 +13,29 @@ namespace {
 
 class MetricImplTest : public testing::Test {
 protected:
-  MetricImplTest()
-      : symbol_table_(SymbolTableCreator::makeSymbolTable()), alloc_(*symbol_table_),
-        pool_(*symbol_table_) {}
+  MetricImplTest() : alloc_(symbol_table_), pool_(symbol_table_) {}
   ~MetricImplTest() override { clearStorage(); }
 
   StatName makeStat(absl::string_view name) { return pool_.add(name); }
 
   void clearStorage() {
     pool_.clear();
-    EXPECT_EQ(0, symbol_table_->numSymbols());
+    EXPECT_EQ(0, symbol_table_.numSymbols());
   }
 
-  SymbolTablePtr symbol_table_;
+  SymbolTableImpl symbol_table_;
   AllocatorImpl alloc_;
   StatNamePool pool_;
 };
 
 // No truncation occurs in the implementation of HeapStatData.
 TEST_F(MetricImplTest, NoTags) {
-  CounterSharedPtr counter = alloc_.makeCounter(makeStat("counter"), "", {});
+  CounterSharedPtr counter = alloc_.makeCounter(makeStat("counter"), StatName(), {});
   EXPECT_EQ(0, counter->tags().size());
 }
 
 TEST_F(MetricImplTest, OneTag) {
-  CounterSharedPtr counter = alloc_.makeCounter(makeStat("counter.name.value"), "counter",
+  CounterSharedPtr counter = alloc_.makeCounter(makeStat("counter.name.value"), makeStat("counter"),
                                                 {{makeStat("name"), makeStat("value")}});
   TagVector tags = counter->tags();
   ASSERT_EQ(1, tags.size());
@@ -51,7 +48,7 @@ TEST_F(MetricImplTest, OneTag) {
 
 TEST_F(MetricImplTest, TwoTagsIterOnce) {
   CounterSharedPtr counter = alloc_.makeCounter(
-      makeStat("counter.name.value"), "counter",
+      makeStat("counter.name.value"), makeStat("counter"),
       {{makeStat("name1"), makeStat("value1")}, {makeStat("name2"), makeStat("value2")}});
   StatName name1 = makeStat("name1");
   StatName value1 = makeStat("value1");
@@ -67,7 +64,7 @@ TEST_F(MetricImplTest, TwoTagsIterOnce) {
 
 TEST_F(MetricImplTest, FindTag) {
   CounterSharedPtr counter = alloc_.makeCounter(
-      makeStat("counter.name.value"), "counter",
+      makeStat("counter.name.value"), makeStat("counter"),
       {{makeStat("name1"), makeStat("value1")}, {makeStat("name2"), makeStat("value2")}});
   EXPECT_EQ(makeStat("value1"), Utility::findTag(*counter, makeStat("name1")));
   EXPECT_EQ(makeStat("value2"), Utility::findTag(*counter, makeStat("name2")));

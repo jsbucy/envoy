@@ -8,13 +8,14 @@
 #include "envoy/service/secret/v3/sds.pb.h"
 
 #include "common/config/api_version.h"
-#include "common/config/resources.h"
 #include "common/event/dispatcher_impl.h"
+#include "common/http/utility.h"
 #include "common/network/connection_impl.h"
 #include "common/network/utility.h"
 
 #include "extensions/transport_sockets/tls/context_config_impl.h"
 #include "extensions/transport_sockets/tls/context_manager_impl.h"
+#include "extensions/transport_sockets/tls/ssl_socket.h"
 
 #include "test/common/grpc/grpc_client_integration.h"
 #include "test/config/integration/certs/clientcert_hash.h"
@@ -22,8 +23,8 @@
 #include "test/integration/server.h"
 #include "test/integration/ssl_utility.h"
 #include "test/mocks/secret/mocks.h"
-#include "test/mocks/server/mocks.h"
 #include "test/test_common/network_utility.h"
+#include "test/test_common/resources.h"
 #include "test/test_common/test_time_system.h"
 #include "test/test_common/utility.h"
 
@@ -150,7 +151,7 @@ public:
                                    ->mutable_listeners(0)
                                    ->mutable_filter_chains(0)
                                    ->mutable_transport_socket();
-      common_tls_context->add_alpn_protocols("http/1.1");
+      common_tls_context->add_alpn_protocols(Http::Utility::AlpnNames::get().Http11);
 
       auto* validation_context = common_tls_context->mutable_validation_context();
       validation_context->mutable_trusted_ca()->set_filename(
@@ -182,10 +183,7 @@ public:
 
   void TearDown() override {
     cleanUpXdsConnection();
-
     client_ssl_ctx_.reset();
-    cleanupUpstreamAndDownstream();
-    codec_client_.reset();
   }
 
   Network::ClientConnectionPtr makeSslClientConnection() {
@@ -227,7 +225,7 @@ TEST_P(SdsDynamicDownstreamIntegrationTest, WrongSecretFirst) {
   };
   initialize();
 
-  codec_client_ = makeRawHttpConnection(makeSslClientConnection());
+  codec_client_ = makeRawHttpConnection(makeSslClientConnection(), absl::nullopt);
   // the connection state is not connected.
   EXPECT_FALSE(codec_client_->connected());
   codec_client_->connection()->close(Network::ConnectionCloseType::NoFlush);
@@ -256,28 +254,14 @@ public:
                                    ->mutable_transport_socket();
       envoy::extensions::transport_sockets::tls::v3::DownstreamTlsContext tls_context;
       auto* common_tls_context = tls_context.mutable_common_tls_context();
-      common_tls_context->add_alpn_protocols("http/1.1");
+      common_tls_context->add_alpn_protocols(Http::Utility::AlpnNames::get().Http11);
 
       auto* tls_certificate = common_tls_context->add_tls_certificates();
       tls_certificate->mutable_certificate_chain()->set_filename(
           TestEnvironment::runfilesPath("test/config/integration/certs/servercert.pem"));
       tls_certificate->mutable_private_key()->set_filename(
           TestEnvironment::runfilesPath("test/config/integration/certs/serverkey.pem"));
-
-      if (use_combined_validation_context_) {
-        // Modify the listener context validation type to use combined certificate validation
-        // context.
-        auto* combined_config = common_tls_context->mutable_combined_validation_context();
-        auto* default_validation_context = combined_config->mutable_default_validation_context();
-        default_validation_context->add_verify_certificate_hash(TEST_CLIENT_CERT_HASH);
-        auto* secret_config = combined_config->mutable_validation_context_sds_secret_config();
-        setUpSdsConfig(secret_config, validation_secret_);
-      } else {
-        // Modify the listener context validation type to use dynamic certificate validation
-        // context.
-        auto* secret_config = common_tls_context->mutable_validation_context_sds_secret_config();
-        setUpSdsConfig(secret_config, validation_secret_);
-      }
+      setUpSdsValidationContext(common_tls_context);
       transport_socket->set_name("envoy.transport_sockets.tls");
       transport_socket->mutable_typed_config()->PackFrom(tls_context);
 
@@ -286,16 +270,86 @@ public:
       sds_cluster->MergeFrom(bootstrap.static_resources().clusters()[0]);
       sds_cluster->set_name("sds_cluster");
       sds_cluster->mutable_http2_protocol_options();
+
+      envoy::extensions::transport_sockets::tls::v3::UpstreamTlsContext upstream_tls_context;
+      if (share_validation_secret_) {
+        // Configure static cluster with SDS config referencing "validation_secret",
+        // which is going to be processed before LDS resources.
+        ASSERT(use_lds_);
+        setUpSdsValidationContext(upstream_tls_context.mutable_common_tls_context());
+      }
+      // Enable SSL/TLS with a client certificate in the first cluster.
+      auto* upstream_tls_certificate =
+          upstream_tls_context.mutable_common_tls_context()->add_tls_certificates();
+      upstream_tls_certificate->mutable_certificate_chain()->set_filename(
+          TestEnvironment::runfilesPath("test/config/integration/certs/clientcert.pem"));
+      upstream_tls_certificate->mutable_private_key()->set_filename(
+          TestEnvironment::runfilesPath("test/config/integration/certs/clientkey.pem"));
+      auto* upstream_transport_socket =
+          bootstrap.mutable_static_resources()->mutable_clusters(0)->mutable_transport_socket();
+      upstream_transport_socket->set_name("envoy.transport_sockets.tls");
+      upstream_transport_socket->mutable_typed_config()->PackFrom(upstream_tls_context);
     });
 
     HttpIntegrationTest::initialize();
+    registerTestServerPorts({"http"});
     client_ssl_ctx_ = createClientSslTransportSocketFactory({}, context_manager_, *api_);
   }
 
+  void setUpSdsValidationContext(
+      envoy::extensions::transport_sockets::tls::v3::CommonTlsContext* common_tls_context) {
+    if (use_combined_validation_context_) {
+      // Modify the listener context validation type to use combined certificate validation
+      // context.
+      auto* combined_config = common_tls_context->mutable_combined_validation_context();
+      auto* default_validation_context = combined_config->mutable_default_validation_context();
+      default_validation_context->add_verify_certificate_hash(TEST_CLIENT_CERT_HASH);
+      auto* secret_config = combined_config->mutable_validation_context_sds_secret_config();
+      setUpSdsConfig(secret_config, validation_secret_);
+    } else {
+      // Modify the listener context validation type to use dynamic certificate validation
+      // context.
+      auto* secret_config = common_tls_context->mutable_validation_context_sds_secret_config();
+      setUpSdsConfig(secret_config, validation_secret_);
+    }
+  }
+
+  void createUpstreams() override {
+    // Fake upstream with SSL/TLS for the first cluster.
+    addFakeUpstream(createUpstreamSslContext(), FakeHttpConnection::Type::HTTP1);
+    create_xds_upstream_ = true;
+  }
+
+  Network::TransportSocketFactoryPtr createUpstreamSslContext() {
+    envoy::extensions::transport_sockets::tls::v3::DownstreamTlsContext tls_context;
+    auto* common_tls_context = tls_context.mutable_common_tls_context();
+    auto* tls_certificate = common_tls_context->add_tls_certificates();
+    tls_certificate->mutable_certificate_chain()->set_filename(
+        TestEnvironment::runfilesPath("test/config/integration/certs/clientcert.pem"));
+    tls_certificate->mutable_private_key()->set_filename(
+        TestEnvironment::runfilesPath("test/config/integration/certs/clientkey.pem"));
+
+    auto cfg = std::make_unique<Extensions::TransportSockets::Tls::ServerContextConfigImpl>(
+        tls_context, factory_context_);
+    static Stats::Scope* upstream_stats_store = new Stats::TestIsolatedStoreImpl();
+    return std::make_unique<Extensions::TransportSockets::Tls::ServerSslSocketFactory>(
+        std::move(cfg), context_manager_, *upstream_stats_store, std::vector<std::string>{});
+  }
+
+  void TearDown() override {
+    cleanUpXdsConnection();
+
+    client_ssl_ctx_.reset();
+    cleanupUpstreamAndDownstream();
+    codec_client_.reset();
+  }
+
   void enableCombinedValidationContext(bool enable) { use_combined_validation_context_ = enable; }
+  void shareValidationSecret(bool share) { share_validation_secret_ = share; }
 
 private:
   bool use_combined_validation_context_{false};
+  bool share_validation_secret_{false};
 };
 
 INSTANTIATE_TEST_SUITE_P(IpVersionsClientType, SdsDynamicDownstreamCertValidationContextTest,
@@ -326,6 +380,53 @@ TEST_P(SdsDynamicDownstreamCertValidationContextTest, CombinedCertValidationCont
     sendSdsResponse(getCvcSecretWithOnlyTrustedCa());
   };
   initialize();
+
+  ConnectionCreationFunction creator = [&]() -> Network::ClientConnectionPtr {
+    return makeSslClientConnection();
+  };
+  testRouterHeaderOnlyRequestAndResponse(&creator);
+}
+
+// A test that verifies that both: static cluster and LDS listener are updated when using
+// the same verification secret (standalone validation context) from the SDS server.
+TEST_P(SdsDynamicDownstreamCertValidationContextTest, BasicWithSharedSecret) {
+  shareValidationSecret(true);
+  on_server_init_function_ = [this]() {
+    createSdsStream(*(fake_upstreams_[1]));
+    sendSdsResponse(getCvcSecret());
+  };
+  initialize();
+
+  // Wait for "ssl_context_updated_by_sds" counters to indicate that both resources
+  // depending on the verification_secret were updated.
+  test_server_->waitForCounterGe(
+      "cluster.cluster_0.client_ssl_socket_factory.ssl_context_update_by_sds", 1);
+  test_server_->waitForCounterGe(
+      listenerStatPrefix("server_ssl_socket_factory.ssl_context_update_by_sds"), 1);
+
+  ConnectionCreationFunction creator = [&]() -> Network::ClientConnectionPtr {
+    return makeSslClientConnection();
+  };
+  testRouterHeaderOnlyRequestAndResponse(&creator);
+}
+
+// A test that verifies that both: static cluster and LDS listener are updated when using
+// the same verification secret (combined validation context) from the SDS server.
+TEST_P(SdsDynamicDownstreamCertValidationContextTest, CombinedValidationContextWithSharedSecret) {
+  enableCombinedValidationContext(true);
+  shareValidationSecret(true);
+  on_server_init_function_ = [this]() {
+    createSdsStream(*(fake_upstreams_[1]));
+    sendSdsResponse(getCvcSecretWithOnlyTrustedCa());
+  };
+  initialize();
+
+  // Wait for "ssl_context_updated_by_sds" counters to indicate that both resources
+  // depending on the verification_secret were updated.
+  test_server_->waitForCounterGe(
+      "cluster.cluster_0.client_ssl_socket_factory.ssl_context_update_by_sds", 1);
+  test_server_->waitForCounterGe(
+      listenerStatPrefix("server_ssl_socket_factory.ssl_context_update_by_sds"), 1);
 
   ConnectionCreationFunction creator = [&]() -> Network::ClientConnectionPtr {
     return makeSslClientConnection();
@@ -372,9 +473,8 @@ public:
 
   void createUpstreams() override {
     // This is for backend with ssl
-    fake_upstreams_.emplace_back(new FakeUpstream(createUpstreamSslContext(context_manager_, *api_),
-                                                  0, FakeHttpConnection::Type::HTTP1, version_,
-                                                  timeSystem()));
+    addFakeUpstream(createUpstreamSslContext(context_manager_, *api_),
+                    FakeHttpConnection::Type::HTTP1);
     create_xds_upstream_ = true;
   }
 };
@@ -391,7 +491,6 @@ TEST_P(SdsDynamicUpstreamIntegrationTest, BasicSuccess) {
   };
 
   initialize();
-  fake_upstreams_[0]->set_allow_unexpected_disconnects(true);
 
   // There is a race condition here; there are two static clusters:
   // backend cluster_0 with sds and sds_cluster. cluster_0 is created first, its init_manager
@@ -415,13 +514,12 @@ TEST_P(SdsDynamicUpstreamIntegrationTest, WrongSecretFirst) {
     sendSdsResponse(getWrongSecret(client_cert_));
   };
   initialize();
-  fake_upstreams_[0]->set_allow_unexpected_disconnects(true);
 
   // Make a simple request, should get 503
   BufferingStreamDecoderPtr response = IntegrationUtil::makeSingleRequest(
       lookupPort("http"), "GET", "/test/long/url", "", downstream_protocol_, version_);
   ASSERT_TRUE(response->complete());
-  EXPECT_EQ("503", response->headers().Status()->value().getStringView());
+  EXPECT_EQ("503", response->headers().getStatusValue());
 
   // To flush out the reset connection from the first request in upstream.
   FakeRawConnectionPtr fake_upstream_connection;

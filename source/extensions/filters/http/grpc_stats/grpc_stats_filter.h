@@ -24,16 +24,20 @@ struct GrpcStatsObject : public StreamInfo::FilterState::Object {
     msg->set_response_message_count(response_message_count);
     return msg;
   }
+
+  absl::optional<std::string> serializeAsString() const override {
+    return absl::StrCat(request_message_count, ",", response_message_count);
+  }
 };
 
-class GrpcStatsFilterConfig
+class GrpcStatsFilterConfigFactory
     : public Common::FactoryBase<envoy::extensions::filters::http::grpc_stats::v3::FilterConfig> {
 public:
-  GrpcStatsFilterConfig() : FactoryBase(HttpFilterNames::get().GrpcStats) {}
+  GrpcStatsFilterConfigFactory() : FactoryBase(HttpFilterNames::get().GrpcStats) {}
 
 private:
   Http::FilterFactoryCb createFilterFactoryFromProtoTyped(
-      const envoy::extensions::filters::http::grpc_stats::v3::FilterConfig& config,
+      const envoy::extensions::filters::http::grpc_stats::v3::FilterConfig& proto_config,
       const std::string&, Server::Configuration::FactoryContext&) override;
 };
 

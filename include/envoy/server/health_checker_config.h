@@ -1,5 +1,6 @@
 #pragma once
 
+#include "envoy/common/random_generator.h"
 #include "envoy/config/core/v3/health_check.pb.h"
 #include "envoy/config/typed_config.h"
 #include "envoy/runtime/runtime.h"
@@ -22,11 +23,6 @@ public:
    * @return Runtime::Loader& the singleton runtime loader for the server.
    */
   virtual Envoy::Runtime::Loader& runtime() PURE;
-
-  /**
-   * @return RandomGenerator& the random generator for the server.
-   */
-  virtual Envoy::Runtime::RandomGenerator& random() PURE;
 
   /**
    * @return Event::Dispatcher& the main thread's dispatcher. This dispatcher should be used
@@ -56,9 +52,9 @@ public:
  * Implemented by each custom health checker and registered via Registry::registerFactory()
  * or the convenience class RegisterFactory.
  */
-class CustomHealthCheckerFactory : public Config::UntypedFactory {
+class CustomHealthCheckerFactory : public Config::TypedFactory {
 public:
-  virtual ~CustomHealthCheckerFactory() = default;
+  ~CustomHealthCheckerFactory() override = default;
 
   /**
    * Creates a particular custom health checker factory implementation.
