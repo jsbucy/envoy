@@ -19,7 +19,6 @@ public:
   const std::string RawBuffer = "envoy.transport_sockets.raw_buffer";
   const std::string Tls = "envoy.transport_sockets.tls";
   const std::string Quic = "envoy.transport_sockets.quic";
-  const std::string SmtpStartTls = "envoy.transport_sockets.smtp_starttls";
 };
 
 using TransportSocketNames = ConstSingleton<TransportSocketNameValues>;
@@ -32,7 +31,6 @@ public:
   const std::string Tls = "tls";
   const std::string RawBuffer = "raw_buffer";
   const std::string Quic = "quic";
-  const std::string SmtpStartTls = "smtp_starttls";
 };
 
 // TODO(lizan): Find a better place to have this singleton.
