@@ -4,7 +4,6 @@
 
 #include "common/stats/isolated_store_impl.h"
 
-#include "test/common/http/http2/codec_impl_test_util.h"
 #include "test/mocks/http/mocks.h"
 #include "test/mocks/network/mocks.h"
 #include "test/test_common/utility.h"
@@ -53,9 +52,9 @@ public:
   CodecFrameInjector(const std::string& injector_name);
 
   // Writes the data using the Http::Connection's nghttp2 session.
-  void write(const Frame& frame, Http::Connection& connection);
+  Http::Status write(const Frame& frame, Http::Connection& connection);
 
-  Http2Settings settings_;
+  envoy::config::core::v3::Http2ProtocolOptions options_;
   Stats::IsolatedStoreImpl stats_store_;
   const std::string injector_name_;
 };

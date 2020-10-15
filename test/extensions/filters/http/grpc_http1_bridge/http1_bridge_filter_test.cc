@@ -1,12 +1,11 @@
 #include "common/buffer/buffer_impl.h"
 #include "common/grpc/common.h"
 #include "common/http/header_map_impl.h"
-#include "common/stats/fake_symbol_table_impl.h"
+#include "common/stats/symbol_table_impl.h"
 
 #include "extensions/filters/http/grpc_http1_bridge/http1_bridge_filter.h"
 
 #include "test/mocks/http/mocks.h"
-#include "test/mocks/upstream/mocks.h"
 #include "test/test_common/global.h"
 #include "test/test_common/printers.h"
 #include "test/test_common/utility.h"
@@ -89,11 +88,11 @@ TEST_F(GrpcHttp1BridgeFilterTest, StatsHttp2HeaderOnlyResponse) {
   EXPECT_EQ(Http::FilterHeadersStatus::Continue, filter_.encodeHeaders(response_headers, true));
   EXPECT_EQ(1UL, decoder_callbacks_.clusterInfo()
                      ->statsScope()
-                     .counter("grpc.lyft.users.BadCompanions.GetBadCompanions.failure")
+                     .counterFromString("grpc.lyft.users.BadCompanions.GetBadCompanions.failure")
                      .value());
   EXPECT_EQ(1UL, decoder_callbacks_.clusterInfo()
                      ->statsScope()
-                     .counter("grpc.lyft.users.BadCompanions.GetBadCompanions.total")
+                     .counterFromString("grpc.lyft.users.BadCompanions.GetBadCompanions.total")
                      .value());
 }
 
@@ -114,11 +113,11 @@ TEST_F(GrpcHttp1BridgeFilterTest, StatsHttp2NormalResponse) {
   EXPECT_EQ(Http::FilterTrailersStatus::Continue, filter_.encodeTrailers(response_trailers));
   EXPECT_EQ(1UL, decoder_callbacks_.clusterInfo()
                      ->statsScope()
-                     .counter("grpc.lyft.users.BadCompanions.GetBadCompanions.success")
+                     .counterFromString("grpc.lyft.users.BadCompanions.GetBadCompanions.success")
                      .value());
   EXPECT_EQ(1UL, decoder_callbacks_.clusterInfo()
                      ->statsScope()
-                     .counter("grpc.lyft.users.BadCompanions.GetBadCompanions.total")
+                     .counterFromString("grpc.lyft.users.BadCompanions.GetBadCompanions.total")
                      .value());
 }
 
@@ -137,11 +136,11 @@ TEST_F(GrpcHttp1BridgeFilterTest, StatsHttp2ContentTypeGrpcPlusProto) {
   EXPECT_EQ(Http::FilterTrailersStatus::Continue, filter_.encodeTrailers(response_trailers));
   EXPECT_EQ(1UL, decoder_callbacks_.clusterInfo()
                      ->statsScope()
-                     .counter("grpc.lyft.users.BadCompanions.GetBadCompanions.success")
+                     .counterFromString("grpc.lyft.users.BadCompanions.GetBadCompanions.success")
                      .value());
   EXPECT_EQ(1UL, decoder_callbacks_.clusterInfo()
                      ->statsScope()
-                     .counter("grpc.lyft.users.BadCompanions.GetBadCompanions.total")
+                     .counterFromString("grpc.lyft.users.BadCompanions.GetBadCompanions.total")
                      .value());
 }
 

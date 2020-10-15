@@ -26,7 +26,7 @@ static_resources:
             typed_config: {}
           codec_type: auto
     listener_filters:
-    - name: envoy.listener.original_dst
+    - name: envoy.filters.listener.original_dst
       typed_config: {}
   clusters:
   - name: cluster1
@@ -35,7 +35,6 @@ static_resources:
     lb_policy: CLUSTER_PROVIDED
     dns_lookup_family: V4_ONLY
 cluster_manager: {}
-watchdog: {}
 admin:
   access_log_path: /tmp/admin_access.log
   address:

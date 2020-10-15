@@ -42,7 +42,7 @@ class RingHashLoadBalancer : public ThreadAwareLoadBalancerBase,
 public:
   RingHashLoadBalancer(
       const PrioritySet& priority_set, ClusterStats& stats, Stats::Scope& scope,
-      Runtime::Loader& runtime, Runtime::RandomGenerator& random,
+      Runtime::Loader& runtime, Random::RandomGenerator& random,
       const absl::optional<envoy::config::cluster::v3::Cluster::RingHashLbConfig>& config,
       const envoy::config::cluster::v3::Cluster::CommonLbConfig& common_config);
 
@@ -59,10 +59,10 @@ private:
   struct Ring : public HashingLoadBalancer {
     Ring(const NormalizedHostWeightVector& normalized_host_weights, double min_normalized_weight,
          uint64_t min_ring_size, uint64_t max_ring_size, HashFunction hash_function,
-         RingHashLoadBalancerStats& stats);
+         bool use_hostname_for_hashing, RingHashLoadBalancerStats& stats);
 
     // ThreadAwareLoadBalancerBase::HashingLoadBalancer
-    HostConstSharedPtr chooseHost(uint64_t hash) const override;
+    HostConstSharedPtr chooseHost(uint64_t hash, uint32_t attempt) const override;
 
     std::vector<RingEntry> ring_;
 
@@ -74,8 +74,15 @@ private:
   HashingLoadBalancerSharedPtr
   createLoadBalancer(const NormalizedHostWeightVector& normalized_host_weights,
                      double min_normalized_weight, double /* max_normalized_weight */) override {
-    return std::make_shared<Ring>(normalized_host_weights, min_normalized_weight, min_ring_size_,
-                                  max_ring_size_, hash_function_, stats_);
+    HashingLoadBalancerSharedPtr ring_hash_lb =
+        std::make_shared<Ring>(normalized_host_weights, min_normalized_weight, min_ring_size_,
+                               max_ring_size_, hash_function_, use_hostname_for_hashing_, stats_);
+    if (hash_balance_factor_ == 0) {
+      return ring_hash_lb;
+    }
+
+    return std::make_shared<BoundedLoadHashingLoadBalancer>(
+        ring_hash_lb, std::move(normalized_host_weights), hash_balance_factor_);
   }
 
   static RingHashLoadBalancerStats generateStats(Stats::Scope& scope);
@@ -88,6 +95,8 @@ private:
   const uint64_t min_ring_size_;
   const uint64_t max_ring_size_;
   const HashFunction hash_function_;
+  const bool use_hostname_for_hashing_;
+  const uint32_t hash_balance_factor_;
 };
 
 } // namespace Upstream

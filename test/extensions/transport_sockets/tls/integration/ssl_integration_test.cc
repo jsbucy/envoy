@@ -34,7 +34,10 @@ namespace Ssl {
 void SslIntegrationTestBase::initialize() {
   config_helper_.addSslConfig(ConfigHelper::ServerSslOptions()
                                   .setRsaCert(server_rsa_cert_)
+                                  .setRsaCertOcspStaple(server_rsa_cert_ocsp_staple_)
                                   .setEcdsaCert(server_ecdsa_cert_)
+                                  .setEcdsaCertOcspStaple(server_ecdsa_cert_ocsp_staple_)
+                                  .setOcspStapleRequired(ocsp_staple_required_)
                                   .setTlsV13(server_tlsv1_3_)
                                   .setExpectClientEcdsaCert(client_ecdsa_cert_));
   HttpIntegrationTest::initialize();
@@ -89,7 +92,7 @@ TEST_P(SslIntegrationTest, RouterRequestAndResponseWithGiantBodyBuffer) {
   ConnectionCreationFunction creator = [&]() -> Network::ClientConnectionPtr {
     return makeSslClientConnection({});
   };
-  testRouterRequestAndResponseWithBody(16 * 1024 * 1024, 16 * 1024 * 1024, false, &creator);
+  testRouterRequestAndResponseWithBody(16 * 1024 * 1024, 16 * 1024 * 1024, false, false, &creator);
   checkStats();
 }
 
@@ -97,7 +100,7 @@ TEST_P(SslIntegrationTest, RouterRequestAndResponseWithBodyNoBuffer) {
   ConnectionCreationFunction creator = [&]() -> Network::ClientConnectionPtr {
     return makeSslClientConnection({});
   };
-  testRouterRequestAndResponseWithBody(1024, 512, false, &creator);
+  testRouterRequestAndResponseWithBody(1024, 512, false, false, &creator);
   checkStats();
 }
 
@@ -108,7 +111,7 @@ TEST_P(SslIntegrationTest, RouterRequestAndResponseWithBodyNoBufferHttp2) {
   ConnectionCreationFunction creator = [&]() -> Network::ClientConnectionPtr {
     return makeSslClientConnection(ClientSslTransportOptions().setAlpn(true));
   };
-  testRouterRequestAndResponseWithBody(1024, 512, false, &creator);
+  testRouterRequestAndResponseWithBody(1024, 512, false, false, &creator);
   checkStats();
 }
 
@@ -116,7 +119,7 @@ TEST_P(SslIntegrationTest, RouterRequestAndResponseWithBodyNoBufferVerifySAN) {
   ConnectionCreationFunction creator = [&]() -> Network::ClientConnectionPtr {
     return makeSslClientConnection(ClientSslTransportOptions().setSan(true));
   };
-  testRouterRequestAndResponseWithBody(1024, 512, false, &creator);
+  testRouterRequestAndResponseWithBody(1024, 512, false, false, &creator);
   checkStats();
 }
 
@@ -125,7 +128,7 @@ TEST_P(SslIntegrationTest, RouterRequestAndResponseWithBodyNoBufferHttp2VerifySA
   ConnectionCreationFunction creator = [&]() -> Network::ClientConnectionPtr {
     return makeSslClientConnection(ClientSslTransportOptions().setAlpn(true).setSan(true));
   };
-  testRouterRequestAndResponseWithBody(1024, 512, false, &creator);
+  testRouterRequestAndResponseWithBody(1024, 512, false, false, &creator);
   checkStats();
 }
 
@@ -174,7 +177,7 @@ TEST_P(SslIntegrationTest, AdminCertEndpoint) {
   BufferingStreamDecoderPtr response = IntegrationUtil::makeSingleRequest(
       lookupPort("admin"), "GET", "/certs", "", downstreamProtocol(), version_);
   EXPECT_TRUE(response->complete());
-  EXPECT_EQ("200", response->headers().Status()->value().getStringView());
+  EXPECT_EQ("200", response->headers().getStatusValue());
 }
 
 // Validate certificate selection across different certificate types and client TLS versions.
@@ -244,7 +247,7 @@ TEST_P(SslCertficateIntegrationTest, ServerRsa) {
   ConnectionCreationFunction creator = [&]() -> Network::ClientConnectionPtr {
     return makeSslClientConnection({});
   };
-  testRouterRequestAndResponseWithBody(1024, 512, false, &creator);
+  testRouterRequestAndResponseWithBody(1024, 512, false, false, &creator);
   checkStats();
 }
 
@@ -255,7 +258,7 @@ TEST_P(SslCertficateIntegrationTest, ServerEcdsa) {
   ConnectionCreationFunction creator = [&]() -> Network::ClientConnectionPtr {
     return makeSslClientConnection({});
   };
-  testRouterRequestAndResponseWithBody(1024, 512, false, &creator);
+  testRouterRequestAndResponseWithBody(1024, 512, false, false, &creator);
   checkStats();
 }
 
@@ -266,7 +269,7 @@ TEST_P(SslCertficateIntegrationTest, ServerRsaEcdsa) {
   ConnectionCreationFunction creator = [&]() -> Network::ClientConnectionPtr {
     return makeSslClientConnection({});
   };
-  testRouterRequestAndResponseWithBody(1024, 512, false, &creator);
+  testRouterRequestAndResponseWithBody(1024, 512, false, false, &creator);
   checkStats();
 }
 
@@ -277,7 +280,7 @@ TEST_P(SslCertficateIntegrationTest, ClientRsaOnly) {
   ConnectionCreationFunction creator = [&]() -> Network::ClientConnectionPtr {
     return makeSslClientConnection(rsaOnlyClientOptions());
   };
-  testRouterRequestAndResponseWithBody(1024, 512, false, &creator);
+  testRouterRequestAndResponseWithBody(1024, 512, false, false, &creator);
   checkStats();
 }
 
@@ -286,7 +289,8 @@ TEST_P(SslCertficateIntegrationTest, ServerEcdsaClientRsaOnly) {
   server_rsa_cert_ = false;
   server_ecdsa_cert_ = true;
   initialize();
-  auto codec_client = makeRawHttpConnection(makeSslClientConnection(rsaOnlyClientOptions()));
+  auto codec_client =
+      makeRawHttpConnection(makeSslClientConnection(rsaOnlyClientOptions()), absl::nullopt);
   EXPECT_FALSE(codec_client->connected());
   const std::string counter_name = listenerStatPrefix("ssl.connection_error");
   Stats::CounterSharedPtr counter = test_server_->counter(counter_name);
@@ -302,7 +306,7 @@ TEST_P(SslCertficateIntegrationTest, ServerRsaEcdsaClientRsaOnly) {
   ConnectionCreationFunction creator = [&]() -> Network::ClientConnectionPtr {
     return makeSslClientConnection(rsaOnlyClientOptions());
   };
-  testRouterRequestAndResponseWithBody(1024, 512, false, &creator);
+  testRouterRequestAndResponseWithBody(1024, 512, false, false, &creator);
   checkStats();
 }
 
@@ -313,7 +317,8 @@ TEST_P(SslCertficateIntegrationTest, ServerRsaClientEcdsaOnly) {
   client_ecdsa_cert_ = true;
   initialize();
   EXPECT_FALSE(
-      makeRawHttpConnection(makeSslClientConnection(ecdsaOnlyClientOptions()))->connected());
+      makeRawHttpConnection(makeSslClientConnection(ecdsaOnlyClientOptions()), absl::nullopt)
+          ->connected());
   const std::string counter_name = listenerStatPrefix("ssl.connection_error");
   Stats::CounterSharedPtr counter = test_server_->counter(counter_name);
   test_server_->waitForCounterGe(counter_name, 1);
@@ -329,7 +334,7 @@ TEST_P(SslCertficateIntegrationTest, ServerEcdsaClientEcdsaOnly) {
   ConnectionCreationFunction creator = [&]() -> Network::ClientConnectionPtr {
     return makeSslClientConnection(ecdsaOnlyClientOptions());
   };
-  testRouterRequestAndResponseWithBody(1024, 512, false, &creator);
+  testRouterRequestAndResponseWithBody(1024, 512, false, false, &creator);
   checkStats();
 }
 
@@ -341,9 +346,63 @@ TEST_P(SslCertficateIntegrationTest, ServerRsaEcdsaClientEcdsaOnly) {
   ConnectionCreationFunction creator = [&]() -> Network::ClientConnectionPtr {
     return makeSslClientConnection(ecdsaOnlyClientOptions());
   };
-  testRouterRequestAndResponseWithBody(1024, 512, false, &creator);
+  testRouterRequestAndResponseWithBody(1024, 512, false, false, &creator);
   checkStats();
 }
+
+// Server has an RSA certificate with an OCSP response works.
+TEST_P(SslCertficateIntegrationTest, ServerRsaOnlyOcspResponse) {
+  server_rsa_cert_ = true;
+  server_rsa_cert_ocsp_staple_ = true;
+  ConnectionCreationFunction creator = [&]() -> Network::ClientConnectionPtr {
+    return makeSslClientConnection(rsaOnlyClientOptions());
+  };
+  testRouterRequestAndResponseWithBody(1024, 512, false, false, &creator);
+  checkStats();
+}
+
+// Server has an ECDSA certificate with an OCSP response works.
+TEST_P(SslCertficateIntegrationTest, ServerEcdsaOnlyOcspResponse) {
+  server_ecdsa_cert_ = true;
+  server_ecdsa_cert_ocsp_staple_ = true;
+  client_ecdsa_cert_ = true;
+  ConnectionCreationFunction creator = [&]() -> Network::ClientConnectionPtr {
+    return makeSslClientConnection(ecdsaOnlyClientOptions());
+  };
+  testRouterRequestAndResponseWithBody(1024, 512, false, false, &creator);
+  checkStats();
+}
+
+// Server has two certificates one with and one without OCSP response works under optional policy.
+TEST_P(SslCertficateIntegrationTest, BothEcdsaAndRsaOnlyRsaOcspResponse) {
+  server_rsa_cert_ = true;
+  server_rsa_cert_ocsp_staple_ = true;
+  server_ecdsa_cert_ = true;
+  client_ecdsa_cert_ = true;
+  ConnectionCreationFunction creator = [&]() -> Network::ClientConnectionPtr {
+    return makeSslClientConnection(ecdsaOnlyClientOptions());
+  };
+  testRouterRequestAndResponseWithBody(1024, 512, false, false, &creator);
+  checkStats();
+}
+
+// Server has ECDSA and RSA certificates with OCSP responses and stapling required policy works.
+TEST_P(SslCertficateIntegrationTest, BothEcdsaAndRsaWithOcspResponseStaplingRequired) {
+  server_rsa_cert_ = true;
+  server_rsa_cert_ocsp_staple_ = true;
+  server_ecdsa_cert_ = true;
+  server_ecdsa_cert_ocsp_staple_ = true;
+  ocsp_staple_required_ = true;
+  client_ecdsa_cert_ = true;
+  ConnectionCreationFunction creator = [&]() -> Network::ClientConnectionPtr {
+    return makeSslClientConnection(ecdsaOnlyClientOptions());
+  };
+  testRouterRequestAndResponseWithBody(1024, 512, false, false, &creator);
+  checkStats();
+}
+
+// TODO(zuercher): write an additional OCSP integration test that validates behavior with an
+// expired OCSP response. (Requires OCSP client-side support in upstream TLS.)
 
 // TODO(mattklein123): Move this into a dedicated integration test for the tap transport socket as
 // well as add more tests.
@@ -394,10 +453,8 @@ public:
   envoy::extensions::transport_sockets::tap::v3::Tap
   createTapConfig(const envoy::config::core::v3::TransportSocket& inner_transport) {
     envoy::extensions::transport_sockets::tap::v3::Tap tap_config;
-    tap_config.mutable_common_config()
-        ->mutable_static_config()
-        ->mutable_match_config()
-        ->set_any_match(true);
+    tap_config.mutable_common_config()->mutable_static_config()->mutable_match()->set_any_match(
+        true);
     auto* output_config =
         tap_config.mutable_common_config()->mutable_static_config()->mutable_output_config();
     if (max_rx_bytes_.has_value()) {
@@ -436,7 +493,7 @@ TEST_P(SslTapIntegrationTest, TwoRequestsWithBinaryProto) {
   // First request (ID will be +1 since the client will also bump).
   const uint64_t first_id = Network::ConnectionImpl::nextGlobalIdForTest() + 1;
   codec_client_ = makeHttpConnection(creator());
-  Http::TestHeaderMapImpl post_request_headers{
+  Http::TestRequestHeaderMapImpl post_request_headers{
       {":method", "POST"},    {":path", "/test/long/url"}, {":scheme", "http"},
       {":authority", "host"}, {"x-lyft-user-id", "123"},   {"x-forwarded-for", "10.0.0.1"}};
   auto response =
@@ -444,7 +501,7 @@ TEST_P(SslTapIntegrationTest, TwoRequestsWithBinaryProto) {
   EXPECT_TRUE(upstream_request_->complete());
   EXPECT_EQ(128, upstream_request_->bodyLength());
   ASSERT_TRUE(response->complete());
-  EXPECT_EQ("200", response->headers().Status()->value().getStringView());
+  EXPECT_EQ("200", response->headers().getStatusValue());
   EXPECT_EQ(256, response->body().size());
   checkStats();
   envoy::config::core::v3::Address expected_local_address;
@@ -474,7 +531,7 @@ TEST_P(SslTapIntegrationTest, TwoRequestsWithBinaryProto) {
   // Verify a second request hits a different file.
   const uint64_t second_id = Network::ConnectionImpl::nextGlobalIdForTest() + 1;
   codec_client_ = makeHttpConnection(creator());
-  Http::TestHeaderMapImpl get_request_headers{
+  Http::TestRequestHeaderMapImpl get_request_headers{
       {":method", "GET"},     {":path", "/test/long/url"}, {":scheme", "http"},
       {":authority", "host"}, {"x-lyft-user-id", "123"},   {"x-forwarded-for", "10.0.0.1"}};
   response =
@@ -482,7 +539,7 @@ TEST_P(SslTapIntegrationTest, TwoRequestsWithBinaryProto) {
   EXPECT_TRUE(upstream_request_->complete());
   EXPECT_EQ(128, upstream_request_->bodyLength());
   ASSERT_TRUE(response->complete());
-  EXPECT_EQ("200", response->headers().Status()->value().getStringView());
+  EXPECT_EQ("200", response->headers().getStatusValue());
   EXPECT_EQ(256, response->body().size());
   checkStats();
   codec_client_->close();
@@ -550,7 +607,7 @@ TEST_P(SslTapIntegrationTest, RequestWithTextProto) {
     return makeSslClientConnection({});
   };
   const uint64_t id = Network::ConnectionImpl::nextGlobalIdForTest() + 1;
-  testRouterRequestAndResponseWithBody(1024, 512, false, &creator);
+  testRouterRequestAndResponseWithBody(1024, 512, false, false, &creator);
   checkStats();
   codec_client_->close();
   test_server_->waitForCounterGe("http.config_test.downstream_cx_destroy", 1);
@@ -576,7 +633,7 @@ TEST_P(SslTapIntegrationTest, RequestWithJsonBodyAsStringUpstreamTap) {
     return makeSslClientConnection({});
   };
   const uint64_t id = Network::ConnectionImpl::nextGlobalIdForTest() + 2;
-  testRouterRequestAndResponseWithBody(512, 1024, false, &creator);
+  testRouterRequestAndResponseWithBody(512, 1024, false, false, &creator);
   checkStats();
   codec_client_->close();
   test_server_->waitForCounterGe("http.config_test.downstream_cx_destroy", 1);

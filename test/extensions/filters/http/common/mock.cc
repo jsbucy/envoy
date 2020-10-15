@@ -17,11 +17,11 @@ MockUpstream::MockUpstream(Upstream::MockClusterManager& mock_cm, const std::str
                 new Http::ResponseMessageImpl(Http::ResponseHeaderMapPtr{
                     new Http::TestResponseHeaderMapImpl{{":status", status_}}}));
             if (response_body_.length()) {
-              response_message->body() = std::make_unique<Buffer::OwnedImpl>(response_body_);
+              response_message->body().add(response_body_);
             } else {
-              response_message->body().reset(nullptr);
+              response_message->body().drain(response_message->body().length());
             }
-            cb.onSuccess(std::move(response_message));
+            cb.onSuccess(request_, std::move(response_message));
             return &request_;
           }));
 }
@@ -33,7 +33,7 @@ MockUpstream::MockUpstream(Upstream::MockClusterManager& mock_cm,
       .WillByDefault(testing::Invoke(
           [this, reason](Http::RequestMessagePtr&, Http::AsyncClient::Callbacks& cb,
                          const Http::AsyncClient::RequestOptions&) -> Http::AsyncClient::Request* {
-            cb.onFailure(reason);
+            cb.onFailure(request_, reason);
             return &request_;
           }));
 }

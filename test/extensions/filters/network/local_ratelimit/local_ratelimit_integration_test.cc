@@ -8,12 +8,7 @@ class LocalRateLimitIntegrationTest : public Event::TestUsingSimulatedTime,
                                       public BaseIntegrationTest {
 public:
   LocalRateLimitIntegrationTest()
-      : BaseIntegrationTest(GetParam(), ConfigHelper::TCP_PROXY_CONFIG) {}
-
-  ~LocalRateLimitIntegrationTest() override {
-    test_server_.reset();
-    fake_upstreams_.clear();
-  }
+      : BaseIntegrationTest(GetParam(), ConfigHelper::tcpProxyConfig()) {}
 
   void setup(const std::string& filter_yaml) {
     config_helper_.addNetworkFilter(filter_yaml);
@@ -28,7 +23,7 @@ INSTANTIATE_TEST_SUITE_P(IpVersions, LocalRateLimitIntegrationTest,
 // Make sure the filter works in the basic case.
 TEST_P(LocalRateLimitIntegrationTest, NoRateLimiting) {
   setup(R"EOF(
-name: envoy.filters.network.local_ratelimit
+name: ratelimit
 typed_config:
   "@type": type.googleapis.com/envoy.config.filter.network.local_rate_limit.v2alpha.LocalRateLimit
   stat_prefix: local_rate_limit_stats
@@ -40,12 +35,12 @@ typed_config:
   IntegrationTcpClientPtr tcp_client = makeTcpConnection(lookupPort("listener_0"));
   FakeRawConnectionPtr fake_upstream_connection;
   ASSERT_TRUE(fake_upstreams_[0]->waitForRawConnection(fake_upstream_connection));
-  tcp_client->write("hello");
+  ASSERT_TRUE(tcp_client->write("hello"));
   ASSERT_TRUE(fake_upstream_connection->waitForData(5));
   ASSERT_TRUE(fake_upstream_connection->write("world"));
   tcp_client->waitForData("world");
   tcp_client->close();
-  ASSERT_TRUE(fake_upstream_connection->waitForDisconnect(true));
+  ASSERT_TRUE(fake_upstream_connection->waitForDisconnect());
 
   EXPECT_EQ(0,
             test_server_->counter("local_rate_limit.local_rate_limit_stats.rate_limited")->value());

@@ -10,6 +10,7 @@
 
 #include "envoy/access_log/access_log.h"
 #include "envoy/api/api.h"
+#include "envoy/common/random_generator.h"
 #include "envoy/config/cluster/v3/cluster.pb.h"
 #include "envoy/config/typed_config.h"
 #include "envoy/event/dispatcher.h"
@@ -79,11 +80,6 @@ public:
   virtual AccessLog::AccessLogManager& logManager() PURE;
 
   /**
-   * @return RandomGenerator& the random generator for the server.
-   */
-  virtual Runtime::RandomGenerator& random() PURE;
-
-  /**
    * @return Runtime::Loader& the singleton runtime loader for the server.
    */
   virtual Runtime::Loader& runtime() PURE;
@@ -126,7 +122,7 @@ public:
  */
 class ClusterFactory : public Config::UntypedFactory {
 public:
-  virtual ~ClusterFactory() = default;
+  ~ClusterFactory() override = default;
 
   /**
    * Create a new instance of cluster. If the implementation is unable to produce a cluster instance

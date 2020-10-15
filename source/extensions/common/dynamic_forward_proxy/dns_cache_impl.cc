@@ -2,6 +2,7 @@
 
 #include "envoy/extensions/common/dynamic_forward_proxy/v3/dns_cache.pb.h"
 
+#include "common/config/utility.h"
 #include "common/http/utility.h"
 #include "common/network/utility.h"
 
@@ -15,14 +16,20 @@ namespace DynamicForwardProxy {
 
 DnsCacheImpl::DnsCacheImpl(
     Event::Dispatcher& main_thread_dispatcher, ThreadLocal::SlotAllocator& tls,
-    Stats::Scope& root_scope,
+    Random::RandomGenerator& random, Runtime::Loader& loader, Stats::Scope& root_scope,
     const envoy::extensions::common::dynamic_forward_proxy::v3::DnsCacheConfig& config)
     : main_thread_dispatcher_(main_thread_dispatcher),
       dns_lookup_family_(Upstream::getDnsLookupFamilyFromEnum(config.dns_lookup_family())),
-      resolver_(main_thread_dispatcher.createDnsResolver({}, false)), tls_slot_(tls.allocateSlot()),
+      resolver_(main_thread_dispatcher.createDnsResolver({}, config.use_tcp_for_dns_lookups())),
+      tls_slot_(tls.allocateSlot()),
       scope_(root_scope.createScope(fmt::format("dns_cache.{}.", config.name()))),
-      stats_{ALL_DNS_CACHE_STATS(POOL_COUNTER(*scope_), POOL_GAUGE(*scope_))},
+      stats_(generateDnsCacheStats(*scope_)),
+      resource_manager_(*scope_, loader, config.name(), config.dns_cache_circuit_breaker()),
       refresh_interval_(PROTOBUF_GET_MS_OR_DEFAULT(config, dns_refresh_rate, 60000)),
+      failure_backoff_strategy_(
+          Config::Utility::prepareDnsRefreshStrategy<
+              envoy::extensions::common::dynamic_forward_proxy::v3::DnsCacheConfig>(
+              config, refresh_interval_.count(), random)),
       host_ttl_(PROTOBUF_GET_MS_OR_DEFAULT(config, host_ttl, 300000)),
       max_hosts_(PROTOBUF_GET_WRAPPED_OR_DEFAULT(config, max_hosts, 1024)) {
   tls_slot_->set([](Event::Dispatcher&) { return std::make_shared<ThreadLocalHostInfo>(); });
@@ -39,6 +46,10 @@ DnsCacheImpl::~DnsCacheImpl() {
   for (auto update_callbacks : update_callbacks_) {
     update_callbacks->cancel();
   }
+}
+
+DnsCacheStats DnsCacheImpl::generateDnsCacheStats(Stats::Scope& scope) {
+  return {ALL_DNS_CACHE_STATS(POOL_COUNTER(scope), POOL_GAUGE(scope))};
 }
 
 DnsCacheImpl::LoadDnsCacheEntryResult
@@ -65,6 +76,20 @@ DnsCacheImpl::loadDnsCacheEntry(absl::string_view host, uint16_t default_port,
             std::make_unique<LoadDnsCacheEntryHandleImpl>(tls_host_info.pending_resolutions_, host,
                                                           callbacks)};
   }
+}
+
+Upstream::ResourceAutoIncDecPtr
+DnsCacheImpl::canCreateDnsRequest(ResourceLimitOptRef pending_requests) {
+  const auto has_pending_requests = pending_requests.has_value();
+  auto& current_pending_requests =
+      has_pending_requests ? pending_requests->get() : resource_manager_.pendingRequests();
+  if (!current_pending_requests.canCreate()) {
+    if (!has_pending_requests) {
+      stats_.dns_rq_pending_overflow_.inc();
+    }
+    return nullptr;
+  }
+  return std::make_unique<Upstream::ResourceAutoIncDec>(current_pending_requests);
 }
 
 absl::flat_hash_map<std::string, DnsHostInfoSharedPtr> DnsCacheImpl::hosts() {
@@ -197,9 +222,17 @@ void DnsCacheImpl::finishResolve(const std::string& host,
   // Kick off the refresh timer.
   // TODO(mattklein123): Consider jitter here. It may not be necessary since the initial host
   // is populated dynamically.
-  // TODO(junr03): more aggressive refresh interval when DNS resolution fails.
-  // related issue: https://github.com/lyft/envoy-mobile/issues/673
-  primary_host_info.refresh_timer_->enableTimer(refresh_interval_);
+  if (status == Network::DnsResolver::ResolutionStatus::Success) {
+    failure_backoff_strategy_->reset();
+    primary_host_info.refresh_timer_->enableTimer(refresh_interval_);
+    ENVOY_LOG(debug, "DNS refresh rate reset for host '{}', refresh rate {} ms", host,
+              refresh_interval_.count());
+  } else {
+    const uint64_t refresh_interval = failure_backoff_strategy_->nextBackOffMs();
+    primary_host_info.refresh_timer_->enableTimer(std::chrono::milliseconds(refresh_interval));
+    ENVOY_LOG(debug, "DNS refresh rate reset for host '{}', (failure) refresh rate {} ms", host,
+              refresh_interval);
+  }
 }
 
 void DnsCacheImpl::runAddUpdateCallbacks(const std::string& host,
@@ -224,8 +257,10 @@ void DnsCacheImpl::updateTlsHostsMap() {
     }
   }
 
-  tls_slot_->runOnAllThreads([this, new_host_map]() {
-    tls_slot_->getTyped<ThreadLocalHostInfo>().updateHostMap(new_host_map);
+  tls_slot_->runOnAllThreads([new_host_map](ThreadLocal::ThreadLocalObjectSharedPtr object)
+                                 -> ThreadLocal::ThreadLocalObjectSharedPtr {
+    object->asType<ThreadLocalHostInfo>().updateHostMap(new_host_map);
+    return object;
   });
 }
 

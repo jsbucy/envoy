@@ -31,13 +31,18 @@ TEST_P(VersionIntegrationTest, DEPRECATED_FEATURE_TEST(IpTaggingV2StaticStructCo
   config:
   )EOF",
                                         ExampleIpTaggingConfig));
+
+  config_helper_.addRuntimeOverride(
+      "envoy.deprecated_features:envoy.extensions.filters.network."
+      "http_connection_manager.v3.HttpFilter.hidden_envoy_deprecated_config",
+      "true");
   initialize();
 }
 
 // envoy.filters.http.ip_tagging from v2 TypedStruct config.
 TEST_P(VersionIntegrationTest, IpTaggingV2StaticTypedStructConfig) {
   config_helper_.addFilter(absl::StrCat(R"EOF(
-name: envoy.filters.http.ip_tagging
+name: ip_tagging
 typed_config:
   "@type": type.googleapis.com/udpa.type.v1.TypedStruct
   type_url: type.googleapis.com/envoy.config.filter.http.ip_tagging.v2.IPTagging
@@ -50,7 +55,7 @@ typed_config:
 // envoy.filters.http.ip_tagging from v3 TypedStruct config.
 TEST_P(VersionIntegrationTest, IpTaggingV3StaticTypedStructConfig) {
   config_helper_.addFilter(absl::StrCat(R"EOF(
-name: envoy.filters.http.ip_tagging
+name: ip_tagging
 typed_config:
   "@type": type.googleapis.com/udpa.type.v1.TypedStruct
   type_url: type.googleapis.com/envoy.extensions.filters.http.ip_tagging.v3.IPTagging
@@ -63,7 +68,7 @@ typed_config:
 // envoy.filters.http.ip_tagging from v2 typed Any config.
 TEST_P(VersionIntegrationTest, IpTaggingV2StaticTypedConfig) {
   config_helper_.addFilter(absl::StrCat(R"EOF(
-  name: envoy.filters.http.ip_tagging
+  name: ip_tagging
   typed_config:
     "@type": type.googleapis.com/envoy.config.filter.http.ip_tagging.v2.IPTagging
   )EOF",
@@ -74,7 +79,7 @@ TEST_P(VersionIntegrationTest, IpTaggingV2StaticTypedConfig) {
 // envoy.filters.http.ip_tagging from v3 typed Any config.
 TEST_P(VersionIntegrationTest, IpTaggingV3StaticTypedConfig) {
   config_helper_.addFilter(absl::StrCat(R"EOF(
-  name: envoy.filters.http.ip_tagging
+  name: ip_tagging
   typed_config:
     "@type": type.googleapis.com/envoy.extensions.filters.http.ip_tagging.v3.IPTagging
   )EOF",

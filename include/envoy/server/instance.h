@@ -7,6 +7,8 @@
 #include "envoy/access_log/access_log.h"
 #include "envoy/api/api.h"
 #include "envoy/common/mutex_tracer.h"
+#include "envoy/common/random_generator.h"
+#include "envoy/config/trace/v3/http_tracer.pb.h"
 #include "envoy/event/timer.h"
 #include "envoy/grpc/context.h"
 #include "envoy/http/context.h"
@@ -74,9 +76,9 @@ public:
   virtual void drainListeners() PURE;
 
   /**
-   * @return const DrainManager& singleton for use by the entire server.
+   * @return DrainManager& singleton for use by the entire server.
    */
-  virtual const DrainManager& drainManager() PURE;
+  virtual DrainManager& drainManager() PURE;
 
   /**
    * @return AccessLogManager for use by the entire server.
@@ -132,11 +134,6 @@ public:
    * @return the server's CLI options.
    */
   virtual const Options& options() PURE;
-
-  /**
-   * @return RandomGenerator& the random generator for the server.
-   */
-  virtual Runtime::RandomGenerator& random() PURE;
 
   /**
    * @return Runtime::Loader& the singleton runtime loader for the server.
@@ -241,6 +238,17 @@ public:
    * @return Configuration::TransportSocketFactoryContext& factory context for transport sockets.
    */
   virtual Configuration::TransportSocketFactoryContext& transportSocketFactoryContext() PURE;
+
+  /**
+   * Set the default server-wide tracer provider configuration that will be used as a fallback
+   * if an "envoy.filters.network.http_connection_manager" filter that has tracing enabled doesn't
+   * define a tracer provider in-place.
+   *
+   * Once deprecation window for the tracer provider configuration in the bootstrap config is over,
+   * this method will no longer be necessary.
+   */
+  virtual void
+  setDefaultTracingConfig(const envoy::config::trace::v3::Tracing& tracing_config) PURE;
 };
 
 } // namespace Server

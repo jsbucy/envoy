@@ -13,7 +13,7 @@
 #include "test/mocks/runtime/mocks.h"
 #include "test/mocks/ssl/mocks.h"
 #include "test/mocks/thread_local/mocks.h"
-#include "test/mocks/upstream/mocks.h"
+#include "test/mocks/upstream/cluster_manager.h"
 #include "test/test_common/environment.h"
 #include "test/test_common/printers.h"
 #include "test/test_common/utility.h"
@@ -112,8 +112,8 @@ ip_white_list:
   std::unique_ptr<ClientSslAuthFilter> instance_;
   Event::MockTimer* interval_timer_;
   Http::AsyncClient::Callbacks* callbacks_;
-  Stats::IsolatedStoreImpl stats_store_;
-  NiceMock<Runtime::MockRandomGenerator> random_;
+  Stats::TestUtil::TestStore stats_store_;
+  NiceMock<Random::MockRandomGenerator> random_;
   Api::ApiPtr api_;
   std::shared_ptr<Ssl::MockConnectionInfo> ssl_;
 };
@@ -170,10 +170,9 @@ TEST_F(ClientSslAuthFilterTest, Ssl) {
   EXPECT_CALL(*interval_timer_, enableTimer(_, _));
   Http::ResponseMessagePtr message(new Http::ResponseMessageImpl(
       Http::ResponseHeaderMapPtr{new Http::TestResponseHeaderMapImpl{{":status", "200"}}}));
-  message->body() = std::make_unique<Buffer::OwnedImpl>(
-      api_->fileSystem().fileReadToEnd(TestEnvironment::runfilesPath(
-          "test/extensions/filters/network/client_ssl_auth/test_data/vpn_response_1.json")));
-  callbacks_->onSuccess(std::move(message));
+  message->body().add(api_->fileSystem().fileReadToEnd(TestEnvironment::runfilesPath(
+      "test/extensions/filters/network/client_ssl_auth/test_data/vpn_response_1.json")));
+  callbacks_->onSuccess(request_, std::move(message));
   EXPECT_EQ(1U,
             stats_store_
                 .gauge("auth.clientssl.vpn.total_principals", Stats::Gauge::ImportMode::NeverImport)
@@ -215,7 +214,7 @@ TEST_F(ClientSslAuthFilterTest, Ssl) {
 
   filter_callbacks_.connection_.raiseEvent(Network::ConnectionEvent::RemoteClose);
   EXPECT_EQ(1U, stats_store_.counter("auth.clientssl.vpn.update_success").value());
-  EXPECT_EQ(2U, stats_store_.counter("auth.clientssl.vpn.auth_ip_white_list").value());
+  EXPECT_EQ(2U, stats_store_.counter("auth.clientssl.vpn.auth_ip_allowlist").value());
   EXPECT_EQ(1U, stats_store_.counter("auth.clientssl.vpn.auth_digest_match").value());
   EXPECT_EQ(1U, stats_store_.counter("auth.clientssl.vpn.auth_digest_no_match").value());
 
@@ -227,7 +226,7 @@ TEST_F(ClientSslAuthFilterTest, Ssl) {
   EXPECT_CALL(*interval_timer_, enableTimer(_, _));
   message = std::make_unique<Http::ResponseMessageImpl>(
       Http::ResponseHeaderMapPtr{new Http::TestResponseHeaderMapImpl{{":status", "503"}}});
-  callbacks_->onSuccess(std::move(message));
+  callbacks_->onSuccess(request_, std::move(message));
 
   // Interval timer fires.
   setupRequest();
@@ -237,8 +236,8 @@ TEST_F(ClientSslAuthFilterTest, Ssl) {
   EXPECT_CALL(*interval_timer_, enableTimer(_, _));
   message = std::make_unique<Http::ResponseMessageImpl>(
       Http::ResponseHeaderMapPtr{new Http::TestResponseHeaderMapImpl{{":status", "200"}}});
-  message->body() = std::make_unique<Buffer::OwnedImpl>("bad_json");
-  callbacks_->onSuccess(std::move(message));
+  message->body().add("bad_json");
+  callbacks_->onSuccess(request_, std::move(message));
 
   // Interval timer fires.
   setupRequest();
@@ -246,7 +245,7 @@ TEST_F(ClientSslAuthFilterTest, Ssl) {
 
   // No response failure.
   EXPECT_CALL(*interval_timer_, enableTimer(_, _));
-  callbacks_->onFailure(Http::AsyncClient::FailureReason::Reset);
+  callbacks_->onFailure(request_, Http::AsyncClient::FailureReason::Reset);
 
   // Interval timer fires, cannot obtain async client.
   EXPECT_CALL(cm_, httpAsyncClientForCluster("vpn")).WillOnce(ReturnRef(cm_.async_client_));
@@ -255,8 +254,11 @@ TEST_F(ClientSslAuthFilterTest, Ssl) {
           Invoke([&](Http::RequestMessagePtr&, Http::AsyncClient::Callbacks& callbacks,
                      const Http::AsyncClient::RequestOptions&) -> Http::AsyncClient::Request* {
             callbacks.onSuccess(
+                request_,
                 Http::ResponseMessagePtr{new Http::ResponseMessageImpl(Http::ResponseHeaderMapPtr{
                     new Http::TestResponseHeaderMapImpl{{":status", "503"}}})});
+            // Intentionally return nullptr (instead of request handle) to trigger a particular
+            // code path.
             return nullptr;
           }));
   EXPECT_CALL(*interval_timer_, enableTimer(_, _));

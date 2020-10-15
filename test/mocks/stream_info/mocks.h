@@ -1,6 +1,7 @@
 #pragma once
 
 #include "envoy/config/core/v3/base.pb.h"
+#include "envoy/http/request_id_extension.h"
 #include "envoy/stream_info/stream_info.h"
 
 #include "common/stream_info/filter_state_impl.h"
@@ -21,6 +22,7 @@ public:
   // StreamInfo::StreamInfo
   MOCK_METHOD(void, setResponseFlag, (ResponseFlag response_flag));
   MOCK_METHOD(void, setResponseCodeDetails, (absl::string_view));
+  MOCK_METHOD(void, setConnectionTerminationDetails, (absl::string_view));
   MOCK_METHOD(bool, intersectResponseFlags, (uint64_t), (const));
   MOCK_METHOD(void, onUpstreamHostSelected, (Upstream::HostDescriptionConstSharedPtr host));
   MOCK_METHOD(SystemTime, startTime, (), (const));
@@ -50,6 +52,7 @@ public:
   MOCK_METHOD(void, protocol, (Http::Protocol protocol));
   MOCK_METHOD(absl::optional<uint32_t>, responseCode, (), (const));
   MOCK_METHOD(const absl::optional<std::string>&, responseCodeDetails, (), (const));
+  MOCK_METHOD(const absl::optional<std::string>&, connectionTerminationDetails, (), (const));
   MOCK_METHOD(void, addBytesSent, (uint64_t));
   MOCK_METHOD(uint64_t, bytesSent, (), (const));
   MOCK_METHOD(bool, hasResponseFlag, (ResponseFlag), (const));
@@ -89,6 +92,13 @@ public:
   MOCK_METHOD(const std::string&, upstreamTransportFailureReason, (), (const));
   MOCK_METHOD(void, setRequestHeaders, (const Http::RequestHeaderMap&));
   MOCK_METHOD(const Http::RequestHeaderMap*, getRequestHeaders, (), (const));
+  MOCK_METHOD(void, setUpstreamClusterInfo, (const Upstream::ClusterInfoConstSharedPtr&));
+  MOCK_METHOD(absl::optional<Upstream::ClusterInfoConstSharedPtr>, upstreamClusterInfo, (),
+              (const));
+  MOCK_METHOD(Http::RequestIDExtensionSharedPtr, getRequestIDExtension, (), (const));
+  MOCK_METHOD(void, setRequestIDExtension, (Http::RequestIDExtensionSharedPtr));
+  MOCK_METHOD(absl::optional<uint64_t>, connectionID, (), (const));
+  MOCK_METHOD(void, setConnectionID, (uint64_t));
 
   std::shared_ptr<testing::NiceMock<Upstream::MockHostDescription>> host_{
       new testing::NiceMock<Upstream::MockHostDescription>()};
@@ -99,6 +109,7 @@ public:
   absl::optional<std::chrono::nanoseconds> first_upstream_tx_byte_sent_;
   absl::optional<std::chrono::nanoseconds> last_upstream_tx_byte_sent_;
   absl::optional<std::chrono::nanoseconds> first_upstream_rx_byte_received_;
+  absl::optional<uint64_t> connection_id_;
   absl::optional<std::chrono::nanoseconds> last_upstream_rx_byte_received_;
   absl::optional<std::chrono::nanoseconds> first_downstream_tx_byte_sent_;
   absl::optional<std::chrono::nanoseconds> last_downstream_tx_byte_sent_;
@@ -106,6 +117,7 @@ public:
   absl::optional<Http::Protocol> protocol_;
   absl::optional<uint32_t> response_code_;
   absl::optional<std::string> response_code_details_;
+  absl::optional<std::string> connection_termination_details_;
   uint64_t response_flags_{};
   envoy::config::core::v3::Metadata metadata_;
   FilterStateSharedPtr upstream_filter_state_;

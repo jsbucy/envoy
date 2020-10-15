@@ -5,9 +5,9 @@
 #include "envoy/service/accesslog/v3/als.pb.h"
 
 #include "common/buffer/zero_copy_input_stream_impl.h"
-#include "common/common/version.h"
 #include "common/grpc/codec.h"
 #include "common/grpc/common.h"
+#include "common/version/version.h"
 
 #include "test/common/grpc/grpc_client_integration.h"
 #include "test/integration/http_integration.h"
@@ -24,23 +24,17 @@ void clearPort(envoy::config::core::v3::Address& address) {
   address.mutable_socket_address()->clear_port_specifier();
 }
 
-class TcpGrpcAccessLogIntegrationTest : public Grpc::GrpcClientIntegrationParamTest,
+class TcpGrpcAccessLogIntegrationTest : public Grpc::VersionedGrpcClientIntegrationParamTest,
                                         public BaseIntegrationTest {
 public:
   TcpGrpcAccessLogIntegrationTest()
-      : BaseIntegrationTest(ipVersion(), ConfigHelper::TCP_PROXY_CONFIG) {
+      : BaseIntegrationTest(ipVersion(), ConfigHelper::tcpProxyConfig()) {
     enable_half_close_ = true;
-  }
-
-  ~TcpGrpcAccessLogIntegrationTest() override {
-    test_server_.reset();
-    fake_upstreams_.clear();
   }
 
   void createUpstreams() override {
     BaseIntegrationTest::createUpstreams();
-    fake_upstreams_.emplace_back(
-        new FakeUpstream(0, FakeHttpConnection::Type::HTTP2, version_, timeSystem()));
+    addFakeUpstream(FakeHttpConnection::Type::HTTP2);
   }
 
   void initialize() override {
@@ -54,20 +48,15 @@ public:
 
     config_helper_.addConfigModifier([this](envoy::config::bootstrap::v3::Bootstrap& bootstrap) {
       auto* listener = bootstrap.mutable_static_resources()->mutable_listeners(0);
-      auto* filter_chain = listener->mutable_filter_chains(0);
-      auto* config_blob = filter_chain->mutable_filters(0)->mutable_typed_config();
-      auto tcp_proxy_config =
-          MessageUtil::anyConvert<envoy::extensions::filters::network::tcp_proxy::v3::TcpProxy>(
-              *config_blob);
-      auto* access_log = tcp_proxy_config.add_access_log();
+      auto* access_log = listener->add_access_log();
       access_log->set_name("grpc_accesslog");
       envoy::extensions::access_loggers::grpc::v3::TcpGrpcAccessLogConfig access_log_config;
       auto* common_config = access_log_config.mutable_common_config();
       common_config->set_log_name("foo");
+      common_config->set_transport_api_version(apiVersion());
       setGrpcService(*common_config->mutable_grpc_service(), "accesslog",
                      fake_upstreams_.back()->localAddress());
       access_log->mutable_typed_config()->PackFrom(access_log_config);
-      config_blob->PackFrom(tcp_proxy_config);
     });
     BaseIntegrationTest::initialize();
   }
@@ -86,11 +75,11 @@ public:
   AssertionResult waitForAccessLogRequest(const std::string& expected_request_msg_yaml) {
     envoy::service::accesslog::v3::StreamAccessLogsMessage request_msg;
     VERIFY_ASSERTION(access_log_request_->waitForGrpcMessage(*dispatcher_, request_msg));
-    EXPECT_EQ("POST", access_log_request_->headers().Method()->value().getStringView());
-    EXPECT_EQ("/envoy.service.accesslog.v2.AccessLogService/StreamAccessLogs",
-              access_log_request_->headers().Path()->value().getStringView());
-    EXPECT_EQ("application/grpc",
-              access_log_request_->headers().ContentType()->value().getStringView());
+    EXPECT_EQ("POST", access_log_request_->headers().getMethodValue());
+    EXPECT_EQ(TestUtility::getVersionedMethodPath("envoy.service.accesslog.{}.AccessLogService",
+                                                  "StreamAccessLogs", apiVersion()),
+              access_log_request_->headers().getPathValue());
+    EXPECT_EQ("application/grpc", access_log_request_->headers().getContentTypeValue());
 
     envoy::service::accesslog::v3::StreamAccessLogsMessage expected_request_msg;
     TestUtility::loadFromYaml(expected_request_msg_yaml, expected_request_msg);
@@ -98,6 +87,7 @@ public:
     // Clear fields which are not deterministic.
     auto* log_entry = request_msg.mutable_tcp_logs()->mutable_log_entry(0);
     clearPort(*log_entry->mutable_common_properties()->mutable_downstream_remote_address());
+    clearPort(*log_entry->mutable_common_properties()->mutable_downstream_direct_remote_address());
     clearPort(*log_entry->mutable_common_properties()->mutable_downstream_local_address());
     clearPort(*log_entry->mutable_common_properties()->mutable_upstream_remote_address());
     clearPort(*log_entry->mutable_common_properties()->mutable_upstream_local_address());
@@ -110,7 +100,10 @@ public:
       node->clear_extensions();
       node->clear_user_agent_build_version();
     }
-    EXPECT_EQ(request_msg.DebugString(), expected_request_msg.DebugString());
+    Config::VersionUtil::scrubHiddenEnvoyDeprecated(request_msg);
+    Config::VersionUtil::scrubHiddenEnvoyDeprecated(expected_request_msg);
+    EXPECT_TRUE(TestUtility::protoEqual(request_msg, expected_request_msg,
+                                        /*ignore_repeated_field_ordering=*/false));
 
     return AssertionSuccess();
   }
@@ -130,7 +123,7 @@ public:
 };
 
 INSTANTIATE_TEST_SUITE_P(IpVersionsCientType, TcpGrpcAccessLogIntegrationTest,
-                         GRPC_CLIENT_INTEGRATION_PARAMS);
+                         VERSIONED_GRPC_CLIENT_INTEGRATION_PARAMS);
 
 // Test a basic full access logging flow.
 TEST_P(TcpGrpcAccessLogIntegrationTest, BasicAccessLogFlow) {
@@ -142,11 +135,11 @@ TEST_P(TcpGrpcAccessLogIntegrationTest, BasicAccessLogFlow) {
 
   ASSERT_TRUE(fake_upstream_connection->write("hello"));
   tcp_client->waitForData("hello");
-  tcp_client->write("bar", false);
+  ASSERT_TRUE(tcp_client->write("bar", false));
 
   ASSERT_TRUE(fake_upstream_connection->write("", true));
   tcp_client->waitForHalfClose();
-  tcp_client->write("", true);
+  ASSERT_TRUE(tcp_client->write("", true));
 
   ASSERT_TRUE(fake_upstream_connection->waitForData(3));
   ASSERT_TRUE(fake_upstream_connection->waitForHalfClose());
@@ -181,11 +174,15 @@ tcp_logs:
         socket_address:
           address: {}
       upstream_cluster: cluster_0
+      downstream_direct_remote_address:
+        socket_address:
+          address: {}
     connection_properties:
       received_bytes: 3
       sent_bytes: 5
 )EOF",
                   VersionInfo::version(), Network::Test::getLoopbackAddressString(ipVersion()),
+                  Network::Test::getLoopbackAddressString(ipVersion()),
                   Network::Test::getLoopbackAddressString(ipVersion()),
                   Network::Test::getLoopbackAddressString(ipVersion()),
                   Network::Test::getLoopbackAddressString(ipVersion()))));

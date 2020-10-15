@@ -22,7 +22,7 @@ public:
       : quic_session_(quic_session) {}
 
   // Http::Connection
-  void dispatch(Buffer::Instance& /*data*/) override {
+  Http::Status dispatch(Buffer::Instance& /*data*/) override {
     // Bypassed. QUIC connection already hands all data to streams.
     NOT_REACHED_GCOVR_EXCL_LINE;
   }
@@ -47,10 +47,7 @@ public:
 
   // Http::Connection
   void goAway() override;
-  void shutdownNotice() override {
-    // TODO(danzh): Add double-GOAWAY support in QUIC.
-    ENVOY_CONN_LOG(error, "Shutdown notice is not propagated to QUIC.", quic_server_session_);
-  }
+  void shutdownNotice() override;
   void onUnderlyingConnectionAboveWriteBufferHighWatermark() override;
   void onUnderlyingConnectionBelowWriteBufferLowWatermark() override;
 

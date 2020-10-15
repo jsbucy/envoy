@@ -23,21 +23,213 @@
 #include "common/http/message_impl.h"
 #include "common/network/utility.h"
 #include "common/protobuf/utility.h"
+#include "common/runtime/runtime_features.h"
 
+#include "absl/container/node_hash_set.h"
 #include "absl/strings/match.h"
 #include "absl/strings/numbers.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_split.h"
 #include "absl/strings/string_view.h"
+#include "nghttp2/nghttp2.h"
 
 namespace Envoy {
+namespace Http {
+namespace Utility {
+Http::Status exceptionToStatus(std::function<Http::Status(Buffer::Instance&)> dispatch,
+                               Buffer::Instance& data) {
+  Http::Status status;
+  try {
+    status = dispatch(data);
+    // TODO(#10878): Remove this when exception removal is complete. It is currently in migration,
+    // so dispatch may either return an error status or throw an exception. Soon we won't need to
+    // catch these exceptions, as all codec errors will be migrated to using error statuses that are
+    // returned from dispatch.
+  } catch (FrameFloodException& e) {
+    status = bufferFloodError(e.what());
+  } catch (CodecProtocolException& e) {
+    status = codecProtocolError(e.what());
+  } catch (PrematureResponseException& e) {
+    status = prematureResponseError(e.what(), e.responseCode());
+  }
+  return status;
+}
+} // namespace Utility
+} // namespace Http
+namespace Http2 {
+namespace Utility {
+
+namespace {
+
+void validateCustomSettingsParameters(
+    const envoy::config::core::v3::Http2ProtocolOptions& options) {
+  std::vector<std::string> parameter_collisions, custom_parameter_collisions;
+  absl::node_hash_set<nghttp2_settings_entry, SettingsEntryHash, SettingsEntryEquals>
+      custom_parameters;
+  // User defined and named parameters with the same SETTINGS identifier can not both be set.
+  for (const auto& it : options.custom_settings_parameters()) {
+    ASSERT(it.identifier().value() <= std::numeric_limits<uint16_t>::max());
+    // Check for custom parameter inconsistencies.
+    const auto result = custom_parameters.insert(
+        {static_cast<int32_t>(it.identifier().value()), it.value().value()});
+    if (!result.second) {
+      if (result.first->value != it.value().value()) {
+        custom_parameter_collisions.push_back(
+            absl::StrCat("0x", absl::Hex(it.identifier().value(), absl::kZeroPad2)));
+        // Fall through to allow unbatched exceptions to throw first.
+      }
+    }
+    switch (it.identifier().value()) {
+    case NGHTTP2_SETTINGS_ENABLE_PUSH:
+      if (it.value().value() == 1) {
+        throw EnvoyException("server push is not supported by Envoy and can not be enabled via a "
+                             "SETTINGS parameter.");
+      }
+      break;
+    case NGHTTP2_SETTINGS_ENABLE_CONNECT_PROTOCOL:
+      // An exception is made for `allow_connect` which can't be checked for presence due to the
+      // use of a primitive type (bool).
+      throw EnvoyException("the \"allow_connect\" SETTINGS parameter must only be configured "
+                           "through the named field");
+    case NGHTTP2_SETTINGS_HEADER_TABLE_SIZE:
+      if (options.has_hpack_table_size()) {
+        parameter_collisions.push_back("hpack_table_size");
+      }
+      break;
+    case NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS:
+      if (options.has_max_concurrent_streams()) {
+        parameter_collisions.push_back("max_concurrent_streams");
+      }
+      break;
+    case NGHTTP2_SETTINGS_INITIAL_WINDOW_SIZE:
+      if (options.has_initial_stream_window_size()) {
+        parameter_collisions.push_back("initial_stream_window_size");
+      }
+      break;
+    default:
+      // Ignore unknown parameters.
+      break;
+    }
+  }
+
+  if (!custom_parameter_collisions.empty()) {
+    throw EnvoyException(fmt::format(
+        "inconsistent HTTP/2 custom SETTINGS parameter(s) detected; identifiers = {{{}}}",
+        absl::StrJoin(custom_parameter_collisions, ",")));
+  }
+  if (!parameter_collisions.empty()) {
+    throw EnvoyException(fmt::format(
+        "the {{{}}} HTTP/2 SETTINGS parameter(s) can not be configured through both named and "
+        "custom parameters",
+        absl::StrJoin(parameter_collisions, ",")));
+  }
+}
+
+} // namespace
+
+const uint32_t OptionsLimits::MIN_HPACK_TABLE_SIZE;
+const uint32_t OptionsLimits::DEFAULT_HPACK_TABLE_SIZE;
+const uint32_t OptionsLimits::MAX_HPACK_TABLE_SIZE;
+const uint32_t OptionsLimits::MIN_MAX_CONCURRENT_STREAMS;
+const uint32_t OptionsLimits::DEFAULT_MAX_CONCURRENT_STREAMS;
+const uint32_t OptionsLimits::MAX_MAX_CONCURRENT_STREAMS;
+const uint32_t OptionsLimits::MIN_INITIAL_STREAM_WINDOW_SIZE;
+const uint32_t OptionsLimits::DEFAULT_INITIAL_STREAM_WINDOW_SIZE;
+const uint32_t OptionsLimits::MAX_INITIAL_STREAM_WINDOW_SIZE;
+const uint32_t OptionsLimits::MIN_INITIAL_CONNECTION_WINDOW_SIZE;
+const uint32_t OptionsLimits::DEFAULT_INITIAL_CONNECTION_WINDOW_SIZE;
+const uint32_t OptionsLimits::MAX_INITIAL_CONNECTION_WINDOW_SIZE;
+const uint32_t OptionsLimits::DEFAULT_MAX_OUTBOUND_FRAMES;
+const uint32_t OptionsLimits::DEFAULT_MAX_OUTBOUND_CONTROL_FRAMES;
+const uint32_t OptionsLimits::DEFAULT_MAX_CONSECUTIVE_INBOUND_FRAMES_WITH_EMPTY_PAYLOAD;
+const uint32_t OptionsLimits::DEFAULT_MAX_INBOUND_PRIORITY_FRAMES_PER_STREAM;
+const uint32_t OptionsLimits::DEFAULT_MAX_INBOUND_WINDOW_UPDATE_FRAMES_PER_DATA_FRAME_SENT;
+
+envoy::config::core::v3::Http2ProtocolOptions
+initializeAndValidateOptions(const envoy::config::core::v3::Http2ProtocolOptions& options,
+                             bool hcm_stream_error_set,
+                             const Protobuf::BoolValue& hcm_stream_error) {
+  auto ret = initializeAndValidateOptions(options);
+  if (Runtime::runtimeFeatureEnabled(
+          "envoy.reloadable_features.hcm_stream_error_on_invalid_message") &&
+      !options.has_override_stream_error_on_invalid_http_message() && hcm_stream_error_set) {
+    ret.mutable_override_stream_error_on_invalid_http_message()->set_value(
+        hcm_stream_error.value());
+  }
+  return ret;
+}
+
+envoy::config::core::v3::Http2ProtocolOptions
+initializeAndValidateOptions(const envoy::config::core::v3::Http2ProtocolOptions& options) {
+  envoy::config::core::v3::Http2ProtocolOptions options_clone(options);
+  // This will throw an exception when a custom parameter and a named parameter collide.
+  validateCustomSettingsParameters(options);
+
+  if (!options.has_override_stream_error_on_invalid_http_message()) {
+    options_clone.mutable_override_stream_error_on_invalid_http_message()->set_value(
+        options.stream_error_on_invalid_http_messaging());
+  }
+
+  if (!options_clone.has_hpack_table_size()) {
+    options_clone.mutable_hpack_table_size()->set_value(OptionsLimits::DEFAULT_HPACK_TABLE_SIZE);
+  }
+  ASSERT(options_clone.hpack_table_size().value() <= OptionsLimits::MAX_HPACK_TABLE_SIZE);
+  if (!options_clone.has_max_concurrent_streams()) {
+    options_clone.mutable_max_concurrent_streams()->set_value(
+        OptionsLimits::DEFAULT_MAX_CONCURRENT_STREAMS);
+  }
+  ASSERT(
+      options_clone.max_concurrent_streams().value() >= OptionsLimits::MIN_MAX_CONCURRENT_STREAMS &&
+      options_clone.max_concurrent_streams().value() <= OptionsLimits::MAX_MAX_CONCURRENT_STREAMS);
+  if (!options_clone.has_initial_stream_window_size()) {
+    options_clone.mutable_initial_stream_window_size()->set_value(
+        OptionsLimits::DEFAULT_INITIAL_STREAM_WINDOW_SIZE);
+  }
+  ASSERT(options_clone.initial_stream_window_size().value() >=
+             OptionsLimits::MIN_INITIAL_STREAM_WINDOW_SIZE &&
+         options_clone.initial_stream_window_size().value() <=
+             OptionsLimits::MAX_INITIAL_STREAM_WINDOW_SIZE);
+  if (!options_clone.has_initial_connection_window_size()) {
+    options_clone.mutable_initial_connection_window_size()->set_value(
+        OptionsLimits::DEFAULT_INITIAL_CONNECTION_WINDOW_SIZE);
+  }
+  ASSERT(options_clone.initial_connection_window_size().value() >=
+             OptionsLimits::MIN_INITIAL_CONNECTION_WINDOW_SIZE &&
+         options_clone.initial_connection_window_size().value() <=
+             OptionsLimits::MAX_INITIAL_CONNECTION_WINDOW_SIZE);
+  if (!options_clone.has_max_outbound_frames()) {
+    options_clone.mutable_max_outbound_frames()->set_value(
+        OptionsLimits::DEFAULT_MAX_OUTBOUND_FRAMES);
+  }
+  if (!options_clone.has_max_outbound_control_frames()) {
+    options_clone.mutable_max_outbound_control_frames()->set_value(
+        OptionsLimits::DEFAULT_MAX_OUTBOUND_CONTROL_FRAMES);
+  }
+  if (!options_clone.has_max_consecutive_inbound_frames_with_empty_payload()) {
+    options_clone.mutable_max_consecutive_inbound_frames_with_empty_payload()->set_value(
+        OptionsLimits::DEFAULT_MAX_CONSECUTIVE_INBOUND_FRAMES_WITH_EMPTY_PAYLOAD);
+  }
+  if (!options_clone.has_max_inbound_priority_frames_per_stream()) {
+    options_clone.mutable_max_inbound_priority_frames_per_stream()->set_value(
+        OptionsLimits::DEFAULT_MAX_INBOUND_PRIORITY_FRAMES_PER_STREAM);
+  }
+  if (!options_clone.has_max_inbound_window_update_frames_per_data_frame_sent()) {
+    options_clone.mutable_max_inbound_window_update_frames_per_data_frame_sent()->set_value(
+        OptionsLimits::DEFAULT_MAX_INBOUND_WINDOW_UPDATE_FRAMES_PER_DATA_FRAME_SENT);
+  }
+
+  return options_clone;
+}
+
+} // namespace Utility
+} // namespace Http2
+
 namespace Http {
 
 static const char kDefaultPath[] = "/";
 
-bool Utility::Url::initialize(absl::string_view absolute_url) {
+bool Utility::Url::initialize(absl::string_view absolute_url, bool is_connect) {
   struct http_parser_url u;
-  const bool is_connect = false;
   http_parser_url_init(&u);
   const int result =
       http_parser_parse_url(absolute_url.data(), absolute_url.length(), is_connect, &u);
@@ -61,12 +253,11 @@ bool Utility::Url::initialize(absl::string_view absolute_url) {
 
   // RFC allows the absolute-uri to not end in /, but the absolute path form
   // must start with
-  uint64_t path_len =
-      absolute_url.length() - (u.field_data[UF_HOST].off + host_and_port().length());
+  uint64_t path_len = absolute_url.length() - (u.field_data[UF_HOST].off + hostAndPort().length());
   if (path_len > 0) {
-    uint64_t path_beginning = u.field_data[UF_HOST].off + host_and_port().length();
+    uint64_t path_beginning = u.field_data[UF_HOST].off + hostAndPort().length();
     path_and_query_params_ = absl::string_view(absolute_url.data() + path_beginning, path_len);
-  } else {
+  } else if (!is_connect) {
     path_and_query_params_ = absl::string_view(kDefaultPath, 1);
   }
   return true;
@@ -91,8 +282,7 @@ void Utility::appendVia(RequestOrResponseHeaderMap& headers, const std::string& 
 std::string Utility::createSslRedirectPath(const RequestHeaderMap& headers) {
   ASSERT(headers.Host());
   ASSERT(headers.Path());
-  return fmt::format("https://{}{}", headers.Host()->value().getStringView(),
-                     headers.Path()->value().getStringView());
+  return fmt::format("https://{}{}", headers.getHostValue(), headers.getPathValue());
 }
 
 Utility::QueryParams Utility::parseQueryString(absl::string_view url) {
@@ -103,14 +293,26 @@ Utility::QueryParams Utility::parseQueryString(absl::string_view url) {
   }
 
   start++;
-  return parseParameters(url, start);
+  return parseParameters(url, start, /*decode_params=*/false);
+}
+
+Utility::QueryParams Utility::parseAndDecodeQueryString(absl::string_view url) {
+  size_t start = url.find('?');
+  if (start == std::string::npos) {
+    QueryParams params;
+    return params;
+  }
+
+  start++;
+  return parseParameters(url, start, /*decode_params=*/true);
 }
 
 Utility::QueryParams Utility::parseFromBody(absl::string_view body) {
-  return parseParameters(body, 0);
+  return parseParameters(body, 0, /*decode_params=*/true);
 }
 
-Utility::QueryParams Utility::parseParameters(absl::string_view data, size_t start) {
+Utility::QueryParams Utility::parseParameters(absl::string_view data, size_t start,
+                                              bool decode_params) {
   QueryParams params;
 
   while (start < data.size()) {
@@ -122,8 +324,10 @@ Utility::QueryParams Utility::parseParameters(absl::string_view data, size_t sta
 
     const size_t equal = param.find('=');
     if (equal != std::string::npos) {
-      params.emplace(StringUtil::subspan(data, start, start + equal),
-                     StringUtil::subspan(data, start + equal + 1, end));
+      const auto param_name = StringUtil::subspan(data, start, start + equal);
+      const auto param_value = StringUtil::subspan(data, start + equal + 1, end);
+      params.emplace(decode_params ? PercentEncoding::decode(param_name) : param_name,
+                     decode_params ? PercentEncoding::decode(param_value) : param_value);
     } else {
       params.emplace(StringUtil::subspan(data, start, end), "");
     }
@@ -146,50 +350,41 @@ absl::string_view Utility::findQueryStringStart(const HeaderString& path) {
 
 std::string Utility::parseCookieValue(const HeaderMap& headers, const std::string& key) {
 
-  struct State {
-    std::string key_;
-    std::string ret_;
-  };
+  std::string ret;
 
-  State state;
-  state.key_ = key;
+  headers.iterateReverse([&key, &ret](const HeaderEntry& header) -> HeaderMap::Iterate {
+    // Find the cookie headers in the request (typically, there's only one).
+    if (header.key() == Http::Headers::get().Cookie.get()) {
 
-  headers.iterateReverse(
-      [](const HeaderEntry& header, void* context) -> HeaderMap::Iterate {
-        // Find the cookie headers in the request (typically, there's only one).
-        if (header.key() == Http::Headers::get().Cookie.get()) {
-
-          // Split the cookie header into individual cookies.
-          for (const auto s : StringUtil::splitToken(header.value().getStringView(), ";")) {
-            // Find the key part of the cookie (i.e. the name of the cookie).
-            size_t first_non_space = s.find_first_not_of(" ");
-            size_t equals_index = s.find('=');
-            if (equals_index == absl::string_view::npos) {
-              // The cookie is malformed if it does not have an `=`. Continue
-              // checking other cookies in this header.
-              continue;
-            }
-            const absl::string_view k = s.substr(first_non_space, equals_index - first_non_space);
-            State* state = static_cast<State*>(context);
-            // If the key matches, parse the value from the rest of the cookie string.
-            if (k == state->key_) {
-              absl::string_view v = s.substr(equals_index + 1, s.size() - 1);
-
-              // Cookie values may be wrapped in double quotes.
-              // https://tools.ietf.org/html/rfc6265#section-4.1.1
-              if (v.size() >= 2 && v.back() == '"' && v[0] == '"') {
-                v = v.substr(1, v.size() - 2);
-              }
-              state->ret_ = std::string{v};
-              return HeaderMap::Iterate::Break;
-            }
-          }
+      // Split the cookie header into individual cookies.
+      for (const auto& s : StringUtil::splitToken(header.value().getStringView(), ";")) {
+        // Find the key part of the cookie (i.e. the name of the cookie).
+        size_t first_non_space = s.find_first_not_of(" ");
+        size_t equals_index = s.find('=');
+        if (equals_index == absl::string_view::npos) {
+          // The cookie is malformed if it does not have an `=`. Continue
+          // checking other cookies in this header.
+          continue;
         }
-        return HeaderMap::Iterate::Continue;
-      },
-      &state);
+        const absl::string_view k = s.substr(first_non_space, equals_index - first_non_space);
+        // If the key matches, parse the value from the rest of the cookie string.
+        if (k == key) {
+          absl::string_view v = s.substr(equals_index + 1, s.size() - 1);
 
-  return state.ret_;
+          // Cookie values may be wrapped in double quotes.
+          // https://tools.ietf.org/html/rfc6265#section-4.1.1
+          if (v.size() >= 2 && v.back() == '"' && v[0] == '"') {
+            v = v.substr(1, v.size() - 2);
+          }
+          ret = std::string{v};
+          return HeaderMap::Iterate::Break;
+        }
+      }
+    }
+    return HeaderMap::Iterate::Continue;
+  });
+
+  return ret;
 }
 
 std::string Utility::makeSetCookieValue(const std::string& key, const std::string& value,
@@ -212,65 +407,33 @@ std::string Utility::makeSetCookieValue(const std::string& key, const std::strin
   return cookie_value;
 }
 
-uint64_t Utility::getResponseStatus(const HeaderMap& headers) {
+uint64_t Utility::getResponseStatus(const ResponseHeaderMap& headers) {
   const HeaderEntry* header = headers.Status();
   uint64_t response_code;
-  if (!header || !absl::SimpleAtoi(headers.Status()->value().getStringView(), &response_code)) {
+  if (!header || !absl::SimpleAtoi(headers.getStatusValue(), &response_code)) {
     throw CodecClientException(":status must be specified and a valid unsigned long");
   }
   return response_code;
 }
 
-bool Utility::isUpgrade(const HeaderMap& headers) {
+bool Utility::isUpgrade(const RequestOrResponseHeaderMap& headers) {
   // In firefox the "Connection" request header value is "keep-alive, Upgrade",
   // we should check if it contains the "Upgrade" token.
-  return (headers.Connection() && headers.Upgrade() &&
-          Envoy::StringUtil::caseFindToken(headers.Connection()->value().getStringView(), ",",
+  return (headers.Upgrade() &&
+          Envoy::StringUtil::caseFindToken(headers.getConnectionValue(), ",",
                                            Http::Headers::get().ConnectionValues.Upgrade.c_str()));
 }
 
-bool Utility::isH2UpgradeRequest(const HeaderMap& headers) {
-  return headers.Method() &&
-         headers.Method()->value().getStringView() == Http::Headers::get().MethodValues.Connect &&
-         headers.Protocol() && !headers.Protocol()->value().empty();
+bool Utility::isH2UpgradeRequest(const RequestHeaderMap& headers) {
+  return headers.getMethodValue() == Http::Headers::get().MethodValues.Connect &&
+         headers.Protocol() && !headers.Protocol()->value().empty() &&
+         headers.Protocol()->value() != Headers::get().ProtocolValues.Bytestream;
 }
 
 bool Utility::isWebSocketUpgradeRequest(const RequestHeaderMap& headers) {
   return (isUpgrade(headers) &&
-          absl::EqualsIgnoreCase(headers.Upgrade()->value().getStringView(),
+          absl::EqualsIgnoreCase(headers.getUpgradeValue(),
                                  Http::Headers::get().UpgradeValues.WebSocket));
-}
-
-Http2Settings
-Utility::parseHttp2Settings(const envoy::config::core::v3::Http2ProtocolOptions& config) {
-  Http2Settings ret;
-  ret.hpack_table_size_ = PROTOBUF_GET_WRAPPED_OR_DEFAULT(
-      config, hpack_table_size, Http::Http2Settings::DEFAULT_HPACK_TABLE_SIZE);
-  ret.max_concurrent_streams_ = PROTOBUF_GET_WRAPPED_OR_DEFAULT(
-      config, max_concurrent_streams, Http::Http2Settings::DEFAULT_MAX_CONCURRENT_STREAMS);
-  ret.initial_stream_window_size_ = PROTOBUF_GET_WRAPPED_OR_DEFAULT(
-      config, initial_stream_window_size, Http::Http2Settings::DEFAULT_INITIAL_STREAM_WINDOW_SIZE);
-  ret.initial_connection_window_size_ =
-      PROTOBUF_GET_WRAPPED_OR_DEFAULT(config, initial_connection_window_size,
-                                      Http::Http2Settings::DEFAULT_INITIAL_CONNECTION_WINDOW_SIZE);
-  ret.max_outbound_frames_ = PROTOBUF_GET_WRAPPED_OR_DEFAULT(
-      config, max_outbound_frames, Http::Http2Settings::DEFAULT_MAX_OUTBOUND_FRAMES);
-  ret.max_outbound_control_frames_ =
-      PROTOBUF_GET_WRAPPED_OR_DEFAULT(config, max_outbound_control_frames,
-                                      Http::Http2Settings::DEFAULT_MAX_OUTBOUND_CONTROL_FRAMES);
-  ret.max_consecutive_inbound_frames_with_empty_payload_ = PROTOBUF_GET_WRAPPED_OR_DEFAULT(
-      config, max_consecutive_inbound_frames_with_empty_payload,
-      Http::Http2Settings::DEFAULT_MAX_CONSECUTIVE_INBOUND_FRAMES_WITH_EMPTY_PAYLOAD);
-  ret.max_inbound_priority_frames_per_stream_ = PROTOBUF_GET_WRAPPED_OR_DEFAULT(
-      config, max_inbound_priority_frames_per_stream,
-      Http::Http2Settings::DEFAULT_MAX_INBOUND_PRIORITY_FRAMES_PER_STREAM);
-  ret.max_inbound_window_update_frames_per_data_frame_sent_ = PROTOBUF_GET_WRAPPED_OR_DEFAULT(
-      config, max_inbound_window_update_frames_per_data_frame_sent,
-      Http::Http2Settings::DEFAULT_MAX_INBOUND_WINDOW_UPDATE_FRAMES_PER_DATA_FRAME_SENT);
-  ret.allow_connect_ = config.allow_connect();
-  ret.allow_metadata_ = config.allow_metadata();
-  ret.stream_error_on_invalid_http_messaging_ = config.stream_error_on_invalid_http_messaging();
-  return ret;
 }
 
 Http1Settings
@@ -280,6 +443,7 @@ Utility::parseHttp1Settings(const envoy::config::core::v3::Http1ProtocolOptions&
   ret.accept_http_10_ = config.accept_http_10();
   ret.default_host_for_http_10_ = config.default_host_for_http_10();
   ret.enable_trailers_ = config.enable_trailers();
+  ret.allow_chunked_length_ = config.allow_chunked_length();
 
   if (config.header_key_format().has_proper_case_words()) {
     ret.header_key_format_ = Http1Settings::HeaderKeyFormat::ProperCase;
@@ -290,64 +454,111 @@ Utility::parseHttp1Settings(const envoy::config::core::v3::Http1ProtocolOptions&
   return ret;
 }
 
-void Utility::sendLocalReply(bool is_grpc, StreamDecoderFilterCallbacks& callbacks,
-                             const bool& is_reset, Code response_code, absl::string_view body_text,
-                             const absl::optional<Grpc::Status::GrpcStatus> grpc_status,
-                             bool is_head_request) {
-  sendLocalReply(
-      is_grpc,
-      [&](ResponseHeaderMapPtr&& headers, bool end_stream) -> void {
-        callbacks.encodeHeaders(std::move(headers), end_stream);
-      },
-      [&](Buffer::Instance& data, bool end_stream) -> void {
-        callbacks.encodeData(data, end_stream);
-      },
-      is_reset, response_code, body_text, grpc_status, is_head_request);
+Http1Settings
+Utility::parseHttp1Settings(const envoy::config::core::v3::Http1ProtocolOptions& config,
+                            const Protobuf::BoolValue& hcm_stream_error) {
+  Http1Settings ret = parseHttp1Settings(config);
+
+  if (config.has_override_stream_error_on_invalid_http_message()) {
+    // override_stream_error_on_invalid_http_message, if set, takes precedence over any HCM
+    // stream_error_on_invalid_http_message
+    ret.stream_error_on_invalid_http_message_ =
+        config.override_stream_error_on_invalid_http_message().value();
+  } else {
+    // fallback to HCM value
+    ret.stream_error_on_invalid_http_message_ = hcm_stream_error.value();
+  }
+
+  return ret;
 }
 
-void Utility::sendLocalReply(
-    bool is_grpc,
-    std::function<void(ResponseHeaderMapPtr&& headers, bool end_stream)> encode_headers,
-    std::function<void(Buffer::Instance& data, bool end_stream)> encode_data, const bool& is_reset,
-    Code response_code, absl::string_view body_text,
-    const absl::optional<Grpc::Status::GrpcStatus> grpc_status, bool is_head_request) {
+void Utility::sendLocalReply(const bool& is_reset, StreamDecoderFilterCallbacks& callbacks,
+                             const LocalReplyData& local_reply_data) {
+  absl::string_view details;
+  if (callbacks.streamInfo().responseCodeDetails().has_value()) {
+    details = callbacks.streamInfo().responseCodeDetails().value();
+  };
+
+  sendLocalReply(
+      is_reset,
+      Utility::EncodeFunctions{nullptr, nullptr,
+                               [&](ResponseHeaderMapPtr&& headers, bool end_stream) -> void {
+                                 callbacks.encodeHeaders(std::move(headers), end_stream, details);
+                               },
+                               [&](Buffer::Instance& data, bool end_stream) -> void {
+                                 callbacks.encodeData(data, end_stream);
+                               }},
+      local_reply_data);
+}
+
+void Utility::sendLocalReply(const bool& is_reset, const EncodeFunctions& encode_functions,
+                             const LocalReplyData& local_reply_data) {
   // encode_headers() may reset the stream, so the stream must not be reset before calling it.
   ASSERT(!is_reset);
-  // Respond with a gRPC trailers-only response if the request is gRPC
-  if (is_grpc) {
-    ResponseHeaderMapPtr response_headers{createHeaderMap<ResponseHeaderMapImpl>(
-        {{Headers::get().Status, std::to_string(enumToInt(Code::OK))},
-         {Headers::get().ContentType, Headers::get().ContentTypeValues.Grpc},
-         {Headers::get().GrpcStatus,
-          std::to_string(enumToInt(
-              grpc_status ? grpc_status.value()
-                          : Grpc::Utility::httpToGrpcStatus(enumToInt(response_code))))}})};
-    if (!body_text.empty() && !is_head_request) {
-      // TODO(dio): Probably it is worth to consider caching the encoded message based on gRPC
-      // status.
-      response_headers->setGrpcMessage(PercentEncoding::encode(body_text));
-    }
-    encode_headers(std::move(response_headers), true); // Trailers only response
-    return;
-  }
+
+  // rewrite_response will rewrite response code and body text.
+  Code response_code = local_reply_data.response_code_;
+  std::string body_text(local_reply_data.body_text_);
+  absl::string_view content_type(Headers::get().ContentTypeValues.Text);
 
   ResponseHeaderMapPtr response_headers{createHeaderMap<ResponseHeaderMapImpl>(
       {{Headers::get().Status, std::to_string(enumToInt(response_code))}})};
-  if (!body_text.empty()) {
-    response_headers->setContentLength(body_text.size());
-    response_headers->setReferenceContentType(Headers::get().ContentTypeValues.Text);
+
+  if (encode_functions.modify_headers_) {
+    encode_functions.modify_headers_(*response_headers);
+  }
+  if (encode_functions.rewrite_) {
+    encode_functions.rewrite_(*response_headers, response_code, body_text, content_type);
   }
 
-  if (is_head_request) {
-    encode_headers(std::move(response_headers), true);
+  // Respond with a gRPC trailers-only response if the request is gRPC
+  if (local_reply_data.is_grpc_) {
+    response_headers->setStatus(std::to_string(enumToInt(Code::OK)));
+    response_headers->setReferenceContentType(Headers::get().ContentTypeValues.Grpc);
+    response_headers->setGrpcStatus(
+        std::to_string(enumToInt(local_reply_data.grpc_status_
+                                     ? local_reply_data.grpc_status_.value()
+                                     : Grpc::Utility::httpToGrpcStatus(enumToInt(response_code)))));
+    if (!body_text.empty() && !local_reply_data.is_head_request_) {
+      // TODO(dio): Probably it is worth to consider caching the encoded message based on gRPC
+      // status.
+      // JsonFormatter adds a '\n' at the end. For header value, it should be removed.
+      // https://github.com/envoyproxy/envoy/blob/master/source/common/formatter/substitution_formatter.cc#L129
+      if (body_text[body_text.length() - 1] == '\n') {
+        body_text = body_text.substr(0, body_text.length() - 1);
+      }
+      response_headers->setGrpcMessage(PercentEncoding::encode(body_text));
+    }
+    // The `modify_headers` function may have added content-length, remove it.
+    response_headers->removeContentLength();
+    encode_functions.encode_headers_(std::move(response_headers), true); // Trailers only response
     return;
   }
 
-  encode_headers(std::move(response_headers), body_text.empty());
-  // encode_headers()) may have changed the referenced is_reset so we need to test it
+  if (!body_text.empty()) {
+    response_headers->setContentLength(body_text.size());
+    // If the `rewrite` function has changed body_text or content-type is not set, set it.
+    // This allows `modify_headers` function to set content-type for the body. For example,
+    // router.direct_response is calling sendLocalReply and may need to set content-type for
+    // the body.
+    if (body_text != local_reply_data.body_text_ || response_headers->ContentType() == nullptr) {
+      response_headers->setReferenceContentType(content_type);
+    }
+  } else {
+    response_headers->removeContentLength();
+    response_headers->removeContentType();
+  }
+
+  if (local_reply_data.is_head_request_) {
+    encode_functions.encode_headers_(std::move(response_headers), true);
+    return;
+  }
+
+  encode_functions.encode_headers_(std::move(response_headers), body_text.empty());
+  // encode_headers() may have changed the referenced is_reset so we need to test it
   if (!body_text.empty() && !is_reset) {
     Buffer::OwnedImpl buffer(body_text);
-    encode_data(buffer, true);
+    encode_functions.encode_data_(buffer, true);
   }
 }
 
@@ -393,7 +604,7 @@ Utility::getLastAddressFromXFF(const Http::RequestHeaderMap& request_headers,
   }
 }
 
-bool Utility::sanitizeConnectionHeader(Http::HeaderMap& headers) {
+bool Utility::sanitizeConnectionHeader(Http::RequestHeaderMap& headers) {
   static const size_t MAX_ALLOWED_NOMINATED_HEADERS = 10;
   static const size_t MAX_ALLOWED_TE_VALUE_SIZE = 256;
 
@@ -434,7 +645,7 @@ bool Utility::sanitizeConnectionHeader(Http::HeaderMap& headers) {
     bool keep_header = false;
 
     // Determine whether the nominated header contains invalid values
-    const HeaderEntry* nominated_header = NULL;
+    HeaderMap::GetResult nominated_header;
 
     if (lcs_header_to_remove == Http::Headers::get().Connection) {
       // Remove the connection header from the nominated tokens if it's self nominated
@@ -461,8 +672,10 @@ bool Utility::sanitizeConnectionHeader(Http::HeaderMap& headers) {
       nominated_header = headers.get(lcs_header_to_remove);
     }
 
-    if (nominated_header) {
-      auto nominated_header_value_sv = nominated_header->value().getStringView();
+    if (!nominated_header.empty()) {
+      // NOTE: The TE header is an inline header, so by definition if we operate on it there can
+      // only be a single value. In all other cases we remove the nominated header.
+      auto nominated_header_value_sv = nominated_header[0]->value().getStringView();
 
       const bool is_te_header = (lcs_header_to_remove == Http::Headers::get().TE);
 
@@ -473,6 +686,7 @@ bool Utility::sanitizeConnectionHeader(Http::HeaderMap& headers) {
       }
 
       if (is_te_header) {
+        ASSERT(nominated_header.size() == 1);
         for (const auto& header_value :
              StringUtil::splitToken(nominated_header_value_sv, ",", false)) {
 
@@ -558,6 +772,14 @@ void Utility::extractHostPathFromUri(const absl::string_view& uri, absl::string_
   }
 }
 
+std::string Utility::localPathFromFilePath(const absl::string_view& file_path) {
+  if (file_path.size() >= 3 && file_path[1] == ':' && file_path[2] == '/' &&
+      std::isalpha(file_path[0])) {
+    return std::string(file_path);
+  }
+  return absl::StrCat("/", file_path);
+}
+
 RequestMessagePtr Utility::prepareHeaders(const envoy::config::core::v3::HttpUri& http_uri) {
   absl::string_view host, path;
   extractHostPathFromUri(http_uri.uri(), host, path);
@@ -597,50 +819,49 @@ const std::string Utility::resetReasonToString(const Http::StreamResetReason res
     return "remote reset";
   case Http::StreamResetReason::RemoteRefusedStreamReset:
     return "remote refused stream reset";
+  case Http::StreamResetReason::ConnectError:
+    return "remote error with CONNECT request";
   }
 
   NOT_REACHED_GCOVR_EXCL_LINE;
 }
 
-void Utility::transformUpgradeRequestFromH1toH2(HeaderMap& headers) {
+void Utility::transformUpgradeRequestFromH1toH2(RequestHeaderMap& headers) {
   ASSERT(Utility::isUpgrade(headers));
 
-  const HeaderString& upgrade = headers.Upgrade()->value();
   headers.setReferenceMethod(Http::Headers::get().MethodValues.Connect);
-  headers.setProtocol(upgrade.getStringView());
+  headers.setProtocol(headers.getUpgradeValue());
   headers.removeUpgrade();
   headers.removeConnection();
   // nghttp2 rejects upgrade requests/responses with content length, so strip
   // any unnecessary content length header.
-  if (headers.ContentLength() != nullptr &&
-      headers.ContentLength()->value().getStringView() == "0") {
+  if (headers.getContentLengthValue() == "0") {
     headers.removeContentLength();
   }
 }
 
-void Utility::transformUpgradeResponseFromH1toH2(HeaderMap& headers) {
+void Utility::transformUpgradeResponseFromH1toH2(ResponseHeaderMap& headers) {
   if (getResponseStatus(headers) == 101) {
     headers.setStatus(200);
   }
   headers.removeUpgrade();
   headers.removeConnection();
-  if (headers.ContentLength() != nullptr &&
-      headers.ContentLength()->value().getStringView() == "0") {
+  if (headers.getContentLengthValue() == "0") {
     headers.removeContentLength();
   }
 }
 
-void Utility::transformUpgradeRequestFromH2toH1(HeaderMap& headers) {
+void Utility::transformUpgradeRequestFromH2toH1(RequestHeaderMap& headers) {
   ASSERT(Utility::isH2UpgradeRequest(headers));
 
-  const HeaderString& protocol = headers.Protocol()->value();
   headers.setReferenceMethod(Http::Headers::get().MethodValues.Get);
-  headers.setUpgrade(protocol.getStringView());
+  headers.setUpgrade(headers.getProtocolValue());
   headers.setReferenceConnection(Http::Headers::get().ConnectionValues.Upgrade);
   headers.removeProtocol();
 }
 
-void Utility::transformUpgradeResponseFromH2toH1(HeaderMap& headers, absl::string_view upgrade) {
+void Utility::transformUpgradeResponseFromH2toH1(ResponseHeaderMap& headers,
+                                                 absl::string_view upgrade) {
   if (getResponseStatus(headers) == 200) {
     headers.setUpgrade(upgrade);
     headers.setReferenceConnection(Http::Headers::get().ConnectionValues.Upgrade);
@@ -689,7 +910,9 @@ void Utility::traversePerFilterConfigGeneric(
   }
 }
 
-std::string Utility::PercentEncoding::encode(absl::string_view value) {
+std::string Utility::PercentEncoding::encode(absl::string_view value,
+                                             absl::string_view reserved_chars) {
+  absl::flat_hash_set<char> reserved_char_set{reserved_chars.begin(), reserved_chars.end()};
   for (size_t i = 0; i < value.size(); ++i) {
     const char& ch = value[i];
     // The escaping characters are defined in
@@ -698,22 +921,23 @@ std::string Utility::PercentEncoding::encode(absl::string_view value) {
     // We do checking for each char in the string. If the current char is included in the defined
     // escaping characters, we jump to "the slow path" (append the char [encoded or not encoded]
     // to the returned string one by one) started from the current index.
-    if (ch < ' ' || ch >= '~' || ch == '%') {
-      return PercentEncoding::encode(value, i);
+    if (ch < ' ' || ch >= '~' || reserved_char_set.find(ch) != reserved_char_set.end()) {
+      return PercentEncoding::encode(value, i, reserved_char_set);
     }
   }
   return std::string(value);
 }
 
-std::string Utility::PercentEncoding::encode(absl::string_view value, const size_t index) {
+std::string Utility::PercentEncoding::encode(absl::string_view value, const size_t index,
+                                             const absl::flat_hash_set<char>& reserved_char_set) {
   std::string encoded;
   if (index > 0) {
-    absl::StrAppend(&encoded, value.substr(0, index - 1));
+    absl::StrAppend(&encoded, value.substr(0, index));
   }
 
   for (size_t i = index; i < value.size(); ++i) {
     const char& ch = value[i];
-    if (ch < ' ' || ch >= '~' || ch == '%') {
+    if (ch < ' ' || ch >= '~' || reserved_char_set.find(ch) != reserved_char_set.end()) {
       // For consistency, URI producers should use uppercase hexadecimal digits for all
       // percent-encodings. https://tools.ietf.org/html/rfc3986#section-2.1.
       absl::StrAppend(&encoded, fmt::format("%{:02X}", ch));
@@ -782,7 +1006,8 @@ Utility::AuthorityAttributes Utility::parseAuthority(absl::string_view host) {
     // but we still need to trim the brackets to send the IPv6 address into the DNS resolver. For
     // now, just do all the trimming here, but in the future we should consider whether we can
     // have unified [] handling as low as possible in the stack.
-    if (potential_ip_address.front() == '[' && potential_ip_address.back() == ']') {
+    if (!potential_ip_address.empty() && potential_ip_address.front() == '[' &&
+        potential_ip_address.back() == ']') {
       potential_ip_address.remove_prefix(1);
       potential_ip_address.remove_suffix(1);
     }

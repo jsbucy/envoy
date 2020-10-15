@@ -7,6 +7,8 @@
 #include "envoy/network/transport_socket.h"
 #include "envoy/upstream/host_description.h"
 
+#include "common/protobuf/protobuf.h"
+
 namespace Envoy {
 
 namespace Event {
@@ -269,7 +271,33 @@ public:
    * @param success boolean telling whether the filter execution was successful or not.
    */
   virtual void continueFilterChain(bool success) PURE;
+
+  /**
+   * @param name the namespace used in the metadata in reverse DNS format, for example:
+   * envoy.test.my_filter.
+   * @param value the struct to set on the namespace. A merge will be performed with new values for
+   * the same key overriding existing.
+   */
+  virtual void setDynamicMetadata(const std::string& name, const ProtobufWkt::Struct& value) PURE;
+
+  /**
+   * @return const envoy::config::core::v3::Metadata& the dynamic metadata associated with this
+   * connection.
+   */
+  virtual envoy::config::core::v3::Metadata& dynamicMetadata() PURE;
+  virtual const envoy::config::core::v3::Metadata& dynamicMetadata() const PURE;
 };
+
+/**
+ *  Interface for a listener filter matching with incoming traffic.
+ */
+class ListenerFilterMatcher {
+public:
+  virtual ~ListenerFilterMatcher() = default;
+  virtual bool matches(Network::ListenerFilterCallbacks& cb) const PURE;
+};
+using ListenerFilterMatcherPtr = std::unique_ptr<ListenerFilterMatcher>;
+using ListenerFilterMatcherSharedPtr = std::shared_ptr<ListenerFilterMatcher>;
 
 /**
  * Listener Filter
@@ -299,9 +327,11 @@ public:
   /**
    * Add a filter to the listener. Filters are invoked in FIFO order (the filter added
    * first is called first).
+   * @param listener_filter_matcher supplies the matcher to decide when filter is enabled.
    * @param filter supplies the filter being added.
    */
-  virtual void addAcceptFilter(ListenerFilterPtr&& filter) PURE;
+  virtual void addAcceptFilter(const ListenerFilterMatcherSharedPtr& listener_filter_matcher,
+                               ListenerFilterPtr&& filter) PURE;
 };
 
 /**
@@ -334,6 +364,16 @@ public:
 };
 
 using FilterChainSharedPtr = std::shared_ptr<FilterChain>;
+
+/**
+ * A filter chain that can be drained.
+ */
+class DrainableFilterChain : public FilterChain {
+public:
+  virtual void startDraining() PURE;
+};
+
+using DrainableFilterChainSharedPtr = std::shared_ptr<DrainableFilterChain>;
 
 /**
  * Interface for searching through configured filter chains.

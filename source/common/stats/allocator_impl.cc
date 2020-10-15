@@ -39,7 +39,7 @@ void AllocatorImpl::debugPrint() {
 }
 #endif
 
-// Counter and Gauge both inherit from from RefcountInterface and
+// Counter, Gauge and TextReadout inherit from RefcountInterface and
 // Metric. MetricImpl takes care of most of the Metric API, but we need to cover
 // symbolTable() here, which we don't store directly, but get it via the alloc,
 // which we need in order to clean up the counter and gauge maps in that class
@@ -49,7 +49,7 @@ void AllocatorImpl::debugPrint() {
 // wasted in the alignment padding next to flags_.
 template <class BaseClass> class StatsSharedImpl : public MetricImpl<BaseClass> {
 public:
-  StatsSharedImpl(StatName name, AllocatorImpl& alloc, absl::string_view tag_extracted_name,
+  StatsSharedImpl(StatName name, AllocatorImpl& alloc, StatName tag_extracted_name,
                   const StatNameTagVector& stat_name_tags)
       : MetricImpl<BaseClass>(name, tag_extracted_name, stat_name_tags, alloc.symbolTable()),
         alloc_(alloc) {}
@@ -63,7 +63,7 @@ public:
   }
 
   // Metric
-  SymbolTable& symbolTable() override { return alloc_.symbolTable(); }
+  SymbolTable& symbolTable() final { return alloc_.symbolTable(); }
   bool used() const override { return flags_ & Metric::Flags::Used; }
 
   // RefcountInterface
@@ -96,14 +96,10 @@ public:
    * our ref-count decrement hits zero. The counters and gauges are held in
    * distinct sets so we virtualize this removal helper.
    */
-  virtual void removeFromSetLockHeld() EXCLUSIVE_LOCKS_REQUIRED(alloc_.mutex_) PURE;
+  virtual void removeFromSetLockHeld() ABSL_EXCLUSIVE_LOCKS_REQUIRED(alloc_.mutex_) PURE;
 
 protected:
   AllocatorImpl& alloc_;
-
-  // Holds backing store shared by both CounterImpl and GaugeImpl. CounterImpl
-  // adds another field, pending_increment_, that is not used in Gauge.
-  std::atomic<uint64_t> value_{0};
 
   // ref_count_ can be incremented as an atomic, without taking a new lock, as
   // the critical 0->1 transition occurs in makeCounter and makeGauge, which
@@ -121,11 +117,11 @@ protected:
 
 class CounterImpl : public StatsSharedImpl<Counter> {
 public:
-  CounterImpl(StatName name, AllocatorImpl& alloc, absl::string_view tag_extracted_name,
+  CounterImpl(StatName name, AllocatorImpl& alloc, StatName tag_extracted_name,
               const StatNameTagVector& stat_name_tags)
       : StatsSharedImpl(name, alloc, tag_extracted_name, stat_name_tags) {}
 
-  void removeFromSetLockHeld() EXCLUSIVE_LOCKS_REQUIRED(alloc_.mutex_) override {
+  void removeFromSetLockHeld() ABSL_EXCLUSIVE_LOCKS_REQUIRED(alloc_.mutex_) override {
     const size_t count = alloc_.counters_.erase(statName());
     ASSERT(count == 1);
   }
@@ -144,12 +140,13 @@ public:
   uint64_t value() const override { return value_; }
 
 private:
+  std::atomic<uint64_t> value_{0};
   std::atomic<uint64_t> pending_increment_{0};
 };
 
 class GaugeImpl : public StatsSharedImpl<Gauge> {
 public:
-  GaugeImpl(StatName name, AllocatorImpl& alloc, absl::string_view tag_extracted_name,
+  GaugeImpl(StatName name, AllocatorImpl& alloc, StatName tag_extracted_name,
             const StatNameTagVector& stat_name_tags, ImportMode import_mode)
       : StatsSharedImpl(name, alloc, tag_extracted_name, stat_name_tags) {
     switch (import_mode) {
@@ -168,28 +165,28 @@ public:
     }
   }
 
-  void removeFromSetLockHeld() override EXCLUSIVE_LOCKS_REQUIRED(alloc_.mutex_) {
+  void removeFromSetLockHeld() override ABSL_EXCLUSIVE_LOCKS_REQUIRED(alloc_.mutex_) {
     const size_t count = alloc_.gauges_.erase(statName());
     ASSERT(count == 1);
   }
 
   // Stats::Gauge
   void add(uint64_t amount) override {
-    value_ += amount;
+    child_value_ += amount;
     flags_ |= Flags::Used;
   }
   void dec() override { sub(1); }
   void inc() override { add(1); }
   void set(uint64_t value) override {
-    value_ = value;
+    child_value_ = value;
     flags_ |= Flags::Used;
   }
   void sub(uint64_t amount) override {
-    ASSERT(value_ >= amount);
+    ASSERT(child_value_ >= amount);
     ASSERT(used() || amount == 0);
-    value_ -= amount;
+    child_value_ -= amount;
   }
-  uint64_t value() const override { return value_; }
+  uint64_t value() const override { return child_value_ + parent_value_; }
 
   ImportMode importMode() const override {
     if (flags_ & Flags::NeverImport) {
@@ -220,32 +217,67 @@ public:
       // A previous revision of Envoy may have transferred a gauge that it
       // thought was Accumulate. But the new version thinks it's NeverImport, so
       // we clear the accumulated value.
-      value_ = 0;
+      parent_value_ = 0;
       flags_ &= ~Flags::Used;
       flags_ |= Flags::NeverImport;
       break;
     }
   }
+
+  void setParentValue(uint64_t value) override { parent_value_ = value; }
+
+private:
+  std::atomic<uint64_t> parent_value_{0};
+  std::atomic<uint64_t> child_value_{0};
 };
 
-CounterSharedPtr AllocatorImpl::makeCounter(StatName name, absl::string_view tag_extracted_name,
+class TextReadoutImpl : public StatsSharedImpl<TextReadout> {
+public:
+  TextReadoutImpl(StatName name, AllocatorImpl& alloc, StatName tag_extracted_name,
+                  const StatNameTagVector& stat_name_tags)
+      : StatsSharedImpl(name, alloc, tag_extracted_name, stat_name_tags) {}
+
+  void removeFromSetLockHeld() ABSL_EXCLUSIVE_LOCKS_REQUIRED(alloc_.mutex_) override {
+    const size_t count = alloc_.text_readouts_.erase(statName());
+    ASSERT(count == 1);
+  }
+
+  // Stats::TextReadout
+  void set(absl::string_view value) override {
+    std::string value_copy(value);
+    absl::MutexLock lock(&mutex_);
+    value_ = std::move(value_copy);
+  }
+  std::string value() const override {
+    absl::MutexLock lock(&mutex_);
+    return value_;
+  }
+
+private:
+  mutable absl::Mutex mutex_;
+  std::string value_ ABSL_GUARDED_BY(mutex_);
+};
+
+CounterSharedPtr AllocatorImpl::makeCounter(StatName name, StatName tag_extracted_name,
                                             const StatNameTagVector& stat_name_tags) {
   Thread::LockGuard lock(mutex_);
   ASSERT(gauges_.find(name) == gauges_.end());
+  ASSERT(text_readouts_.find(name) == text_readouts_.end());
   auto iter = counters_.find(name);
   if (iter != counters_.end()) {
     return CounterSharedPtr(*iter);
   }
-  auto counter = CounterSharedPtr(new CounterImpl(name, *this, tag_extracted_name, stat_name_tags));
+  auto counter = CounterSharedPtr(makeCounterInternal(name, tag_extracted_name, stat_name_tags));
   counters_.insert(counter.get());
   return counter;
 }
 
-GaugeSharedPtr AllocatorImpl::makeGauge(StatName name, absl::string_view tag_extracted_name,
+GaugeSharedPtr AllocatorImpl::makeGauge(StatName name, StatName tag_extracted_name,
                                         const StatNameTagVector& stat_name_tags,
                                         Gauge::ImportMode import_mode) {
   Thread::LockGuard lock(mutex_);
   ASSERT(counters_.find(name) == counters_.end());
+  ASSERT(text_readouts_.find(name) == text_readouts_.end());
   auto iter = gauges_.find(name);
   if (iter != gauges_.end()) {
     return GaugeSharedPtr(*iter);
@@ -256,12 +288,32 @@ GaugeSharedPtr AllocatorImpl::makeGauge(StatName name, absl::string_view tag_ext
   return gauge;
 }
 
+TextReadoutSharedPtr AllocatorImpl::makeTextReadout(StatName name, StatName tag_extracted_name,
+                                                    const StatNameTagVector& stat_name_tags) {
+  Thread::LockGuard lock(mutex_);
+  ASSERT(counters_.find(name) == counters_.end());
+  ASSERT(gauges_.find(name) == gauges_.end());
+  auto iter = text_readouts_.find(name);
+  if (iter != text_readouts_.end()) {
+    return TextReadoutSharedPtr(*iter);
+  }
+  auto text_readout =
+      TextReadoutSharedPtr(new TextReadoutImpl(name, *this, tag_extracted_name, stat_name_tags));
+  text_readouts_.insert(text_readout.get());
+  return text_readout;
+}
+
 bool AllocatorImpl::isMutexLockedForTest() {
   bool locked = mutex_.tryLock();
   if (locked) {
     mutex_.unlock();
   }
   return !locked;
+}
+
+Counter* AllocatorImpl::makeCounterInternal(StatName name, StatName tag_extracted_name,
+                                            const StatNameTagVector& stat_name_tags) {
+  return new CounterImpl(name, *this, tag_extracted_name, stat_name_tags);
 }
 
 } // namespace Stats

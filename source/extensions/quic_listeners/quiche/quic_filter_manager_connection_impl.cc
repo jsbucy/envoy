@@ -106,6 +106,13 @@ QuicFilterManagerConnectionImpl::remoteAddress() const {
 }
 
 const Network::Address::InstanceConstSharedPtr&
+QuicFilterManagerConnectionImpl::directRemoteAddress() const {
+  ASSERT(quic_connection_->connectionSocket() != nullptr,
+         "directRemoteAddress() should only be called after OnPacketHeader");
+  return quic_connection_->connectionSocket()->directRemoteAddress();
+}
+
+const Network::Address::InstanceConstSharedPtr&
 QuicFilterManagerConnectionImpl::localAddress() const {
   ASSERT(quic_connection_->connectionSocket() != nullptr,
          "localAddress() should only be called after OnPacketHeader");
@@ -123,7 +130,13 @@ void QuicFilterManagerConnectionImpl::rawWrite(Buffer::Instance& /*data*/, bool 
 }
 
 void QuicFilterManagerConnectionImpl::adjustBytesToSend(int64_t delta) {
+  const size_t bytes_to_send_old = bytes_to_send_;
   bytes_to_send_ += delta;
+  if (delta < 0) {
+    ASSERT(bytes_to_send_old > bytes_to_send_);
+  } else {
+    ASSERT(bytes_to_send_old <= bytes_to_send_);
+  }
   write_buffer_watermark_simulation_.checkHighWatermark(bytes_to_send_);
   write_buffer_watermark_simulation_.checkLowWatermark(bytes_to_send_);
 }

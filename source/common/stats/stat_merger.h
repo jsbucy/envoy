@@ -14,8 +14,6 @@ namespace Stats {
 // (typically hot restart parent+child) Envoy processes.
 class StatMerger {
 public:
-  using DynamicSpan = std::pair<uint32_t, uint32_t>;
-  using DynamicSpans = std::vector<DynamicSpan>;
   using DynamicsMap = absl::flat_hash_map<std::string, DynamicSpans>;
 
   // Holds state needed to construct StatName with mixed dynamic/symbolic
@@ -24,19 +22,6 @@ public:
   public:
     DynamicContext(SymbolTable& symbol_table)
         : symbol_table_(symbol_table), symbolic_pool_(symbol_table), dynamic_pool_(symbol_table) {}
-
-    /**
-     * Identifies the dynamic components of a stat_name into an array of integer
-     * pairs, indicating the begin/end of spans of tokens in the stat-name that
-     * are created from StatNameDynamicStore or StatNameDynamicPool.
-     *
-     * This can be used to reconstruct the same exact StatNames in mergeStats(),
-     * to enable stat continuity across hot-restart.
-     *
-     * @param stat_name the input stat name.
-     * @return the array pair indicating the bounds.
-     */
-    static DynamicSpans encodeSegments(StatName stat_name);
 
     /**
      * Generates a StatName with mixed dynamic/symbolic components based on
@@ -56,12 +41,35 @@ public:
   };
 
   StatMerger(Stats::Store& target_store);
+  ~StatMerger();
 
-  // Merge the values of stats_proto into stats_store. Counters are always straightforward
-  // addition, while gauges default to addition but have exceptions.
+  /**
+   * Merge the values of stats_proto into stats_store. Counters are always
+   * straightforward addition, while gauges default to addition but have
+   * exceptions.
+   *
+   * @param counter_deltas map of counter changes from parent
+   * @param gauges map of gauge changes from parent
+   * @param dynamics information about which segments of the names are dynamic.
+   */
   void mergeStats(const Protobuf::Map<std::string, uint64_t>& counter_deltas,
                   const Protobuf::Map<std::string, uint64_t>& gauges,
                   const DynamicsMap& dynamics = DynamicsMap());
+
+  /**
+   * Indicates that a gauge's value from the hot-restart parent should be
+   * retained, combining it with the child data. By default, data is transferred
+   * from parent gauges only during the hot-restart process, but the parent
+   * contribution is subtracted from the child when the parent terminates. This
+   * makes sense for gauges such as active connection counts, but is not
+   * appropriate for server.hot_restart_generation.
+   *
+   * This function must be called immediately prior to destruction of the
+   * StatMerger instance.
+   *
+   * @param gauge_name The gauge to be retained.
+   */
+  void retainParentGaugeValue(Stats::StatName gauge_name);
 
 private:
   void mergeCounters(const Protobuf::Map<std::string, uint64_t>& counter_deltas,
@@ -69,7 +77,7 @@ private:
   void mergeGauges(const Protobuf::Map<std::string, uint64_t>& gauges,
                    const DynamicsMap& dynamics_map);
 
-  StatNameHashMap<uint64_t> parent_gauge_values_;
+  StatNameHashSet parent_gauges_;
   // A stats Scope for our in-the-merging-process counters to live in. Scopes conceptually hold
   // shared_ptrs to the stats that live in them, with the question of which stats are living in a
   // given scope determined by which stat names have been accessed via that scope. E.g., if you

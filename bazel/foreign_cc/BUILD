@@ -1,10 +1,13 @@
-licenses(["notice"])  # Apache 2
-
+load("@rules_cc//cc:defs.bzl", "cc_library")
 load("//bazel:envoy_build_system.bzl", "envoy_cmake_external", "envoy_package")
 load("@rules_foreign_cc//tools/build_defs:configure.bzl", "configure_make")
 
+licenses(["notice"])  # Apache 2
+
 envoy_package()
 
+# autotools packages are unusable on Windows as-is
+# TODO: Consider our own gperftools.BUILD file as we do with many other packages
 configure_make(
     name = "gperftools_build",
     configure_options = [
@@ -22,11 +25,13 @@ configure_make(
         "//bazel:debug_tcmalloc": ["libtcmalloc_debug.a"],
         "//conditions:default": ["libtcmalloc_and_profiler.a"],
     }),
+    tags = ["skip_on_windows"],
 )
 
 # Workaround for https://github.com/bazelbuild/rules_foreign_cc/issues/227
 cc_library(
     name = "gperftools",
+    tags = ["skip_on_windows"],
     deps = [
         "gperftools_build",
     ],
@@ -40,13 +45,38 @@ configure_make(
         # https://github.com/envoyproxy/envoy/issues/6084
         # TODO(htuch): Remove when #6084 is fixed
         "//bazel:asan_build": {"ENVOY_CONFIG_ASAN": "1"},
+        "//bazel:msan_build": {"ENVOY_CONFIG_MSAN": "1"},
+        "//bazel:windows_dbg_build": {"WINDOWS_DBG_BUILD": "debug"},
         "//conditions:default": {},
     }),
     lib_source = "@com_github_luajit_luajit//:all",
     make_commands = [],
-    static_libraries = [
-        "libluajit-5.1.a",
-    ],
+    out_include_dir = "include/luajit-2.1",
+    static_libraries = select({
+        "//bazel:windows_x86_64": ["lua51.lib"],
+        "//conditions:default": ["libluajit-5.1.a"],
+    }),
+)
+
+configure_make(
+    name = "moonjit",
+    configure_command = "build.py",
+    configure_env_vars = select({
+        # This shouldn't be needed! See
+        # https://github.com/envoyproxy/envoy/issues/6084
+        # TODO(htuch): Remove when #6084 is fixed
+        "//bazel:asan_build": {"ENVOY_CONFIG_ASAN": "1"},
+        "//bazel:msan_build": {"ENVOY_CONFIG_MSAN": "1"},
+        "//bazel:windows_dbg_build": {"WINDOWS_DBG_BUILD": "debug"},
+        "//conditions:default": {},
+    }),
+    lib_source = "@com_github_moonjit_moonjit//:all",
+    make_commands = [],
+    out_include_dir = "include/moonjit-2.2",
+    static_libraries = select({
+        "//bazel:windows_x86_64": ["lua51.lib"],
+        "//conditions:default": ["libluajit-5.1.a"],
+    }),
 )
 
 envoy_cmake_external(
@@ -55,9 +85,18 @@ envoy_cmake_external(
         "CARES_SHARED": "no",
         "CARES_STATIC": "on",
         "CMAKE_CXX_COMPILER_FORCED": "on",
+        "CMAKE_INSTALL_LIBDIR": "lib",
     },
     defines = ["CARES_STATICLIB"],
     lib_source = "@com_github_c_ares_c_ares//:all",
+    linkopts = select({
+        "//bazel:apple": ["-lresolv"],
+        "//conditions:default": [],
+    }),
+    postfix_script = select({
+        "//bazel:windows_x86_64": "cp -L $EXT_BUILD_ROOT/external/com_github_c_ares_c_ares/nameser.h $INSTALLDIR/include/nameser.h",
+        "//conditions:default": "",
+    }),
     static_libraries = select({
         "//bazel:windows_x86_64": ["cares.lib"],
         "//conditions:default": ["libcares.a"],
@@ -76,6 +115,10 @@ envoy_cmake_external(
         "CMAKE_USE_GSSAPI": "off",
         "HTTP_ONLY": "on",
         "CMAKE_INSTALL_LIBDIR": "lib",
+        # Explicitly enable Unix sockets, once afunix.h is correctly detected
+        # "USE_UNIX_SOCKETS": "on",
+        # Explicitly disable "Windows" crypto for Windows
+        "CURL_DISABLE_CRYPTO_AUTH": "on",
         # C-Ares.
         "ENABLE_ARES": "on",
         "CARES_LIBRARY": "$EXT_BUILD_DEPS/ares",
@@ -95,7 +138,6 @@ envoy_cmake_external(
         "ZLIB_LIBRARY": "$EXT_BUILD_DEPS/zlib",
         "ZLIB_INCLUDE_DIR": "$EXT_BUILD_DEPS/zlib/include",
         "CMAKE_CXX_COMPILER_FORCED": "on",
-        "CMAKE_C_FLAGS_BAZEL": "-fPIC",
     },
     defines = ["CURL_STATICLIB"],
     generate_crosstool_file = True,
@@ -107,8 +149,8 @@ envoy_cmake_external(
     deps = [
         ":ares",
         ":nghttp2",
-        ":zlib",
         "//external:ssl",
+        "//external:zlib",
     ],
 )
 
@@ -116,6 +158,7 @@ envoy_cmake_external(
     name = "event",
     cache_entries = {
         "EVENT__DISABLE_OPENSSL": "on",
+        "EVENT__DISABLE_MBEDTLS": "on",
         "EVENT__DISABLE_REGRESS": "on",
         "EVENT__DISABLE_TESTS": "on",
         "EVENT__LIBRARY_TYPE": "STATIC",
@@ -150,6 +193,109 @@ envoy_cmake_external(
 )
 
 envoy_cmake_external(
+    name = "llvm",
+    cache_entries = {
+        # Disable both: BUILD and INCLUDE, since some of the INCLUDE
+        # targets build code instead of only generating build files.
+        "LLVM_BUILD_DOCS": "off",
+        "LLVM_INCLUDE_DOCS": "off",
+        "LLVM_BUILD_EXAMPLES": "off",
+        "LLVM_INCLUDE_EXAMPLES": "off",
+        "LLVM_BUILD_RUNTIME": "off",
+        "LLVM_BUILD_RUNTIMES": "off",
+        "LLVM_INCLUDE_RUNTIMES": "off",
+        "LLVM_BUILD_TESTS": "off",
+        "LLVM_INCLUDE_TESTS": "off",
+        "LLVM_BUILD_TOOLS": "off",
+        "LLVM_INCLUDE_TOOLS": "off",
+        "LLVM_BUILD_UTILS": "off",
+        "LLVM_INCLUDE_UTILS": "off",
+        "LLVM_ENABLE_LIBEDIT": "off",
+        "LLVM_ENABLE_LIBXML2": "off",
+        "LLVM_ENABLE_TERMINFO": "off",
+        "LLVM_ENABLE_ZLIB": "off",
+        "LLVM_TARGETS_TO_BUILD": "X86",
+        "CMAKE_CXX_COMPILER_FORCED": "on",
+        # Workaround for the issue with statically linked libstdc++
+        # using -l:libstdc++.a.
+        "CMAKE_CXX_FLAGS": "-lstdc++",
+    },
+    env_vars = {
+        # Workaround for the -DDEBUG flag added in fastbuild on macOS,
+        # which conflicts with DEBUG macro used in LLVM.
+        "CFLAGS": "-UDEBUG",
+        "CXXFLAGS": "-UDEBUG",
+        "ASMFLAGS": "-UDEBUG",
+    },
+    lib_source = "@org_llvm_llvm//:all",
+    static_libraries = select({
+        "//conditions:default": [
+            # Order from llvm-config --libnames.
+            "libLLVMLTO.a",
+            "libLLVMPasses.a",
+            "libLLVMObjCARCOpts.a",
+            "libLLVMSymbolize.a",
+            "libLLVMDebugInfoPDB.a",
+            "libLLVMDebugInfoDWARF.a",
+            "libLLVMFuzzMutate.a",
+            "libLLVMTableGen.a",
+            "libLLVMDlltoolDriver.a",
+            "libLLVMLineEditor.a",
+            "libLLVMOrcJIT.a",
+            "libLLVMCoverage.a",
+            "libLLVMMIRParser.a",
+            "libLLVMObjectYAML.a",
+            "libLLVMLibDriver.a",
+            "libLLVMOption.a",
+            "libLLVMWindowsManifest.a",
+            "libLLVMX86Disassembler.a",
+            "libLLVMX86AsmParser.a",
+            "libLLVMX86CodeGen.a",
+            "libLLVMGlobalISel.a",
+            "libLLVMSelectionDAG.a",
+            "libLLVMAsmPrinter.a",
+            "libLLVMDebugInfoCodeView.a",
+            "libLLVMDebugInfoMSF.a",
+            "libLLVMX86Desc.a",
+            "libLLVMMCDisassembler.a",
+            "libLLVMX86Info.a",
+            "libLLVMX86Utils.a",
+            "libLLVMMCJIT.a",
+            "libLLVMInterpreter.a",
+            "libLLVMExecutionEngine.a",
+            "libLLVMRuntimeDyld.a",
+            "libLLVMCodeGen.a",
+            "libLLVMTarget.a",
+            "libLLVMCoroutines.a",
+            "libLLVMipo.a",
+            "libLLVMInstrumentation.a",
+            "libLLVMVectorize.a",
+            "libLLVMScalarOpts.a",
+            "libLLVMLinker.a",
+            "libLLVMIRReader.a",
+            "libLLVMAsmParser.a",
+            "libLLVMInstCombine.a",
+            "libLLVMTransformUtils.a",
+            "libLLVMBitWriter.a",
+            "libLLVMAnalysis.a",
+            "libLLVMProfileData.a",
+            "libLLVMObject.a",
+            "libLLVMMCParser.a",
+            "libLLVMMC.a",
+            "libLLVMBitReader.a",
+            "libLLVMBitstreamReader.a",
+            "libLLVMCore.a",
+            "libLLVMBinaryFormat.a",
+            "libLLVMSupport.a",
+            "libLLVMDemangle.a",
+            "libLLVMRemarks.a",
+            "libLLVMCFGuard.a",
+            "libLLVMTextAPI.a",
+        ],
+    }),
+)
+
+envoy_cmake_external(
     name = "nghttp2",
     cache_entries = {
         "ENABLE_LIB_ONLY": "on",
@@ -163,32 +309,72 @@ envoy_cmake_external(
     defines = ["NGHTTP2_STATICLIB"],
     lib_source = "@com_github_nghttp2_nghttp2//:all",
     static_libraries = select({
-        "//bazel:windows_x86_64": ["nghttp2_static.lib"],
-        "//conditions:default": ["libnghttp2_static.a"],
+        "//bazel:windows_x86_64": ["nghttp2.lib"],
+        "//conditions:default": ["libnghttp2.a"],
     }),
 )
 
 envoy_cmake_external(
-    name = "yaml",
+    name = "wavm",
+    binaries = ["wavm"],
     cache_entries = {
-        "YAML_CPP_BUILD_TESTS": "off",
-        "YAML_CPP_BUILD_TOOLS": "off",
-        "CMAKE_CXX_COMPILER_FORCED": "on",
+        "LLVM_DIR": "$EXT_BUILD_DEPS/copy_llvm/llvm/lib/cmake/llvm",
+        "WAVM_ENABLE_STATIC_LINKING": "on",
+        "WAVM_ENABLE_RELEASE_ASSERTS": "on",
+        "WAVM_ENABLE_UNWIND": "no",
+        # Workaround for the issue with statically linked libstdc++
+        # using -l:libstdc++.a.
+        "CMAKE_CXX_FLAGS": "-lstdc++ -Wno-unused-command-line-argument",
     },
-    lib_source = "@com_github_jbeder_yaml_cpp//:all",
+    defines = ["ENVOY_WASM_WAVM"],
+    env_vars = {
+        # Workaround for the -DDEBUG flag added in fastbuild on macOS,
+        # which conflicts with DEBUG macro used in LLVM.
+        "CFLAGS": "-UDEBUG",
+        "CXXFLAGS": "-UDEBUG",
+        "ASMFLAGS": "-UDEBUG",
+    },
+    lib_source = "@com_github_wavm_wavm//:all",
     static_libraries = select({
-        "//bazel:windows_x86_64": ["libyaml-cpp.lib"],
-        "//conditions:default": ["libyaml-cpp.a"],
+        "//conditions:default": [
+            "libWAVM.a",
+        ],
     }),
+    deps = [":llvm"],
 )
 
 envoy_cmake_external(
     name = "zlib",
     cache_entries = {
-        "BUILD_SHARED_LIBS": "off",
         "CMAKE_CXX_COMPILER_FORCED": "on",
+        "CMAKE_C_COMPILER_FORCED": "on",
+        "SKIP_BUILD_EXAMPLES": "on",
+
+        # The following entries are for zlib-ng. Since zlib and zlib-ng are compatible source
+        # codes and CMake ignores unknown cache entries, it is fine to combine it into one
+        # dictionary.
+        #
+        # Reference: https://github.com/zlib-ng/zlib-ng#build-options.
+        "ZLIB_COMPAT": "on",
+        "ZLIB_ENABLE_TESTS": "off",
+
+        # Warning: Turning WITH_OPTIM to "on" doesn't pass ZlibCompressorImplTest.CallingChecksum.
+        "WITH_OPTIM": "on",
+        # However turning off SSE4 fixes it.
+        "WITH_SSE4": "off",
+
+        # Warning: Turning WITH_NEW_STRATEGIES to "on" doesn't pass gzip compressor fuzz test.
+        # Turning this off means falling into NO_QUICK_STRATEGY route.
+        "WITH_NEW_STRATEGIES": "off",
+
+        # Only allow aligned address.
+        # Reference: https://github.com/zlib-ng/zlib-ng#advanced-build-options.
+        "UNALIGNED_OK": "off",
     },
-    lib_source = "@net_zlib//:all",
+    lib_source = select({
+        "//bazel:zlib_ng": "@com_github_zlib_ng_zlib_ng//:all",
+        "//conditions:default": "@net_zlib//:all",
+    }),
     static_libraries = select({
         "//bazel:windows_x86_64": ["zlibstatic.lib"],
         "//conditions:default": ["libz.a"],

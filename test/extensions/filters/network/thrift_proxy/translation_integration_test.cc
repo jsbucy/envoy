@@ -23,11 +23,11 @@ class ThriftTranslationIntegrationTest
           std::tuple<TransportType, ProtocolType, TransportType, ProtocolType>>,
       public BaseThriftIntegrationTest {
 public:
-  static void SetUpTestSuite() {
-    thrift_config_ = ConfigHelper::BASE_CONFIG + R"EOF(
+  static void SetUpTestSuite() { // NOLINT(readability-identifier-naming)
+    thrift_config_ = absl::StrCat(ConfigHelper::baseConfig(), R"EOF(
     filter_chains:
       filters:
-        - name: envoy.filters.network.thrift_proxy
+        - name: thrift
           typed_config:
             "@type": type.googleapis.com/envoy.config.filter.network.thrift_proxy.v2alpha1.ThriftProxy
             stat_prefix: thrift_stats
@@ -38,7 +38,7 @@ public:
                     method_name: "add"
                   route:
                     cluster: "cluster_0"
-      )EOF";
+      )EOF");
   }
 
   void initialize() override {
@@ -82,11 +82,6 @@ public:
     BaseThriftIntegrationTest::initialize();
   }
 
-  void TearDown() override {
-    test_server_.reset();
-    fake_upstreams_.clear();
-  }
-
   Buffer::OwnedImpl downstream_request_bytes_;
   Buffer::OwnedImpl downstream_response_bytes_;
   Buffer::OwnedImpl upstream_request_bytes_;
@@ -121,7 +116,7 @@ TEST_P(ThriftTranslationIntegrationTest, Translates) {
   initialize();
 
   IntegrationTcpClientPtr tcp_client = makeTcpConnection(lookupPort("listener_0"));
-  tcp_client->write(downstream_request_bytes_.toString());
+  ASSERT_TRUE(tcp_client->write(downstream_request_bytes_.toString()));
 
   FakeRawConnectionPtr fake_upstream_connection;
   ASSERT_TRUE(fake_upstreams_[0]->waitForRawConnection(fake_upstream_connection));

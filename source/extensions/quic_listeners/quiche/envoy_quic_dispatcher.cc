@@ -1,5 +1,7 @@
 #include "extensions/quic_listeners/quiche/envoy_quic_dispatcher.h"
 
+#include "common/http/utility.h"
+
 #include "extensions/quic_listeners/quiche/envoy_quic_server_connection.h"
 #include "extensions/quic_listeners/quiche/envoy_quic_server_session.h"
 
@@ -30,8 +32,9 @@ EnvoyQuicDispatcher::EnvoyQuicDispatcher(
   // TODO(#8826) Ideally we should use the negotiated value from upstream which is not accessible
   // for now. 512MB is way to large, but the actual bytes buffered should be bound by the negotiated
   // upstream flow control window.
-  SetQuicFlag(FLAGS_quic_buffered_data_threshold,
-              2 * Http::Http2Settings::DEFAULT_INITIAL_STREAM_WINDOW_SIZE); // 512MB
+  SetQuicFlag(
+      FLAGS_quic_buffered_data_threshold,
+      2 * ::Envoy::Http2::Utility::OptionsLimits::DEFAULT_INITIAL_STREAM_WINDOW_SIZE); // 512MB
 }
 
 void EnvoyQuicDispatcher::OnConnectionClosed(quic::QuicConnectionId connection_id,
@@ -45,16 +48,16 @@ void EnvoyQuicDispatcher::OnConnectionClosed(quic::QuicConnectionId connection_i
 }
 
 std::unique_ptr<quic::QuicSession> EnvoyQuicDispatcher::CreateQuicSession(
-    quic::QuicConnectionId server_connection_id, const quic::QuicSocketAddress& peer_address,
-    quiche::QuicheStringPiece /*alpn*/, const quic::ParsedQuicVersion& version) {
+    quic::QuicConnectionId server_connection_id, const quic::QuicSocketAddress& /*self_address*/,
+    const quic::QuicSocketAddress& peer_address, quiche::QuicheStringPiece /*alpn*/,
+    const quic::ParsedQuicVersion& version) {
   auto quic_connection = std::make_unique<EnvoyQuicServerConnection>(
       server_connection_id, peer_address, *helper(), *alarm_factory(), writer(),
-      /*owns_writer=*/false, quic::ParsedQuicVersionVector{version}, listener_config_,
-      listener_stats_, listen_socket_);
+      /*owns_writer=*/false, quic::ParsedQuicVersionVector{version}, listen_socket_);
   auto quic_session = std::make_unique<EnvoyQuicServerSession>(
       config(), quic::ParsedQuicVersionVector{version}, std::move(quic_connection), this,
       session_helper(), crypto_config(), compressed_certs_cache(), dispatcher_,
-      listener_config_.perConnectionBufferLimitBytes());
+      listener_config_.perConnectionBufferLimitBytes(), listener_config_);
   quic_session->Initialize();
   // Filter chain can't be retrieved here as self address is unknown at this
   // point.

@@ -1,7 +1,6 @@
 #include <string>
 
 #include "common/stats/allocator_impl.h"
-#include "common/stats/symbol_table_creator.h"
 
 #include "test/test_common/logging.h"
 #include "test/test_common/thread_factory_for_test.h"
@@ -15,23 +14,21 @@ namespace {
 
 class AllocatorImplTest : public testing::Test {
 protected:
-  AllocatorImplTest()
-      : symbol_table_(SymbolTableCreator::makeSymbolTable()), alloc_(*symbol_table_),
-        pool_(*symbol_table_) {}
+  AllocatorImplTest() : alloc_(symbol_table_), pool_(symbol_table_) {}
   ~AllocatorImplTest() override { clearStorage(); }
 
   StatNameStorage makeStatStorage(absl::string_view name) {
-    return StatNameStorage(name, *symbol_table_);
+    return StatNameStorage(name, symbol_table_);
   }
 
   StatName makeStat(absl::string_view name) { return pool_.add(name); }
 
   void clearStorage() {
     pool_.clear();
-    EXPECT_EQ(0, symbol_table_->numSymbols());
+    EXPECT_EQ(0, symbol_table_.numSymbols());
   }
 
-  SymbolTablePtr symbol_table_;
+  SymbolTableImpl symbol_table_;
   AllocatorImpl alloc_;
   StatNamePool pool_;
 };
@@ -39,9 +36,9 @@ protected:
 // Allocate 2 counters of the same name, and you'll get the same object.
 TEST_F(AllocatorImplTest, CountersWithSameName) {
   StatName counter_name = makeStat("counter.name");
-  CounterSharedPtr c1 = alloc_.makeCounter(counter_name, "", {});
+  CounterSharedPtr c1 = alloc_.makeCounter(counter_name, StatName(), {});
   EXPECT_EQ(1, c1->use_count());
-  CounterSharedPtr c2 = alloc_.makeCounter(counter_name, "", {});
+  CounterSharedPtr c2 = alloc_.makeCounter(counter_name, StatName(), {});
   EXPECT_EQ(2, c1->use_count());
   EXPECT_EQ(2, c2->use_count());
   EXPECT_EQ(c1.get(), c2.get());
@@ -57,9 +54,9 @@ TEST_F(AllocatorImplTest, CountersWithSameName) {
 
 TEST_F(AllocatorImplTest, GaugesWithSameName) {
   StatName gauge_name = makeStat("gauges.name");
-  GaugeSharedPtr g1 = alloc_.makeGauge(gauge_name, "", {}, Gauge::ImportMode::Accumulate);
+  GaugeSharedPtr g1 = alloc_.makeGauge(gauge_name, StatName(), {}, Gauge::ImportMode::Accumulate);
   EXPECT_EQ(1, g1->use_count());
-  GaugeSharedPtr g2 = alloc_.makeGauge(gauge_name, "", {}, Gauge::ImportMode::Accumulate);
+  GaugeSharedPtr g2 = alloc_.makeGauge(gauge_name, StatName(), {}, Gauge::ImportMode::Accumulate);
   EXPECT_EQ(2, g1->use_count());
   EXPECT_EQ(2, g2->use_count());
   EXPECT_EQ(g1.get(), g2.get());
@@ -92,8 +89,8 @@ TEST_F(AllocatorImplTest, RefCountDecAllocRaceOrganic) {
     threads.push_back(thread_factory.createThread([&]() {
       go.WaitForNotification();
       for (uint32_t i = 0; i < iters; ++i) {
-        alloc_.makeCounter(counter_name, "", {});
-        alloc_.makeGauge(gauge_name, "", {}, Gauge::ImportMode::NeverImport);
+        alloc_.makeCounter(counter_name, StatName(), {});
+        alloc_.makeGauge(gauge_name, StatName(), {}, Gauge::ImportMode::NeverImport);
       }
     }));
   }
@@ -116,7 +113,7 @@ TEST_F(AllocatorImplTest, RefCountDecAllocRaceSynchronized) {
   alloc_.sync().enable();
   alloc_.sync().waitOn(AllocatorImpl::DecrementToZeroSyncPoint);
   Thread::ThreadPtr thread = thread_factory.createThread([&]() {
-    CounterSharedPtr counter = alloc_.makeCounter(counter_name, "", {});
+    CounterSharedPtr counter = alloc_.makeCounter(counter_name, StatName(), {});
     counter->inc();
     counter->reset(); // Blocks in thread synchronizer waiting on DecrementToZeroSyncPoint
   });

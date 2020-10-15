@@ -11,7 +11,6 @@
 #include "common/config/datasource.h"
 #include "common/tracing/http_tracer_impl.h"
 
-#include "extensions/tracers/well_known_names.h"
 #include "extensions/tracers/xray/xray_tracer_impl.h"
 
 namespace Envoy {
@@ -19,15 +18,15 @@ namespace Extensions {
 namespace Tracers {
 namespace XRay {
 
-XRayTracerFactory::XRayTracerFactory() : FactoryBase(TracerNames::get().XRay) {}
+XRayTracerFactory::XRayTracerFactory() : FactoryBase("envoy.tracers.xray") {}
 
-Tracing::HttpTracerPtr
+Tracing::HttpTracerSharedPtr
 XRayTracerFactory::createHttpTracerTyped(const envoy::config::trace::v3::XRayConfig& proto_config,
-                                         Server::Instance& server) {
+                                         Server::Configuration::TracerFactoryContext& context) {
   std::string sampling_rules_json;
   try {
-    sampling_rules_json =
-        Config::DataSource::read(proto_config.sampling_rule_manifest(), true, server.api());
+    sampling_rules_json = Config::DataSource::read(proto_config.sampling_rule_manifest(), true,
+                                                   context.serverFactoryContext().api());
   } catch (EnvoyException& e) {
     ENVOY_LOG(error, "Failed to read sampling rules manifest because of {}.", e.what());
   }
@@ -44,10 +43,18 @@ XRayTracerFactory::createHttpTracerTyped(const envoy::config::trace::v3::XRayCon
   const std::string endpoint = fmt::format("{}:{}", proto_config.daemon_endpoint().address(),
                                            proto_config.daemon_endpoint().port_value());
 
-  XRayConfiguration xconfig{endpoint, proto_config.segment_name(), sampling_rules_json};
-  auto xray_driver = std::make_unique<XRay::Driver>(xconfig, server);
+  auto aws = absl::flat_hash_map<std::string, ProtobufWkt::Value>{};
+  for (const auto& field : proto_config.segment_fields().aws().fields()) {
+    aws.emplace(field.first, field.second);
+  }
+  const auto& origin = proto_config.segment_fields().origin();
+  XRayConfiguration xconfig{endpoint, proto_config.segment_name(), sampling_rules_json, origin,
+                            std::move(aws)};
 
-  return std::make_unique<Tracing::HttpTracerImpl>(std::move(xray_driver), server.localInfo());
+  auto xray_driver = std::make_unique<XRay::Driver>(xconfig, context);
+
+  return std::make_shared<Tracing::HttpTracerImpl>(std::move(xray_driver),
+                                                   context.serverFactoryContext().localInfo());
 }
 
 /**

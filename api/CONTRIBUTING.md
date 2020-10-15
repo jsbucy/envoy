@@ -9,7 +9,7 @@ changes. They may be as part of a larger implementation PR. Please follow the st
 process for validating build/test sanity of `api/` before submitting a PR.
 
 *Note: New .proto files should be added to
-[BUILD](https://github.com/envoyproxy/envoy/blob/master/api/docs/BUILD) in order to get the RSTs generated.*
+[BUILD](https://github.com/envoyproxy/envoy/blob/master/api/versioning/BUILD) in order to get the RSTs generated.*
 
 ## Documentation changes
 
@@ -24,6 +24,12 @@ The documentation can be built locally in the root of https://github.com/envoypr
 
 ```
 docs/build.sh
+```
+
+To skip configuration examples validation:
+
+```
+SPHINX_SKIP_CONFIG_VALIDATION=true docs/build.sh
 ```
 
 Or to use a hermetic Docker container:

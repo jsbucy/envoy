@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -128,6 +129,12 @@ public:
   virtual uint64_t id() const PURE;
 
   /**
+   * @param vector of bytes to which the connection should append hash key data. Any data already in
+   * the key vector must not be modified.
+   */
+  virtual void hashKey(std::vector<uint8_t>& hash) const PURE;
+
+  /**
    * @return std::string the next protocol to use as selected by network level negotiation. (E.g.,
    *         ALPN). If network level negotiation is not supported by the connection or no protocol
    *         has been negotiated the empty string is returned.
@@ -171,6 +178,13 @@ public:
    * @return The address of the remote client. Note that this method will never return nullptr.
    */
   virtual const Network::Address::InstanceConstSharedPtr& remoteAddress() const PURE;
+
+  /**
+   * @return The address of the remote directly connected peer. Note that this method
+   * will never return nullptr. This address is not affected or modified by PROXY protocol
+   * or any other listener filter.
+   */
+  virtual const Network::Address::InstanceConstSharedPtr& directRemoteAddress() const PURE;
 
   /**
    * Credentials of the peer of a socket as decided by SO_PEERCRED.
@@ -294,6 +308,13 @@ public:
    *         occurred an empty string is returned.
    */
   virtual absl::string_view transportFailureReason() const PURE;
+
+  /**
+   *  @return absl::optional<std::chrono::milliseconds> An optional of the most recent round-trip
+   *  time of the connection. If the platform does not support this, then an empty optional is
+   *  returned.
+   */
+  virtual absl::optional<std::chrono::milliseconds> lastRoundTripTime() const PURE;
 };
 
 using ConnectionPtr = std::unique_ptr<Connection>;

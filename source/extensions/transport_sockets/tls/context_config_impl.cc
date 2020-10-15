@@ -12,6 +12,8 @@
 #include "common/secret/sds_api.h"
 #include "common/ssl/certificate_validation_context_config_impl.h"
 
+#include "extensions/transport_sockets/tls/ssl_handshaker.h"
+
 #include "openssl/ssl.h"
 
 namespace Envoy {
@@ -138,11 +140,24 @@ Secret::TlsSessionTicketKeysConfigProviderSharedPtr getTlsSessionTicketKeysConfi
     }
   }
   case envoy::extensions::transport_sockets::tls::v3::DownstreamTlsContext::
+      SessionTicketKeysTypeCase::kDisableStatelessSessionResumption:
+  case envoy::extensions::transport_sockets::tls::v3::DownstreamTlsContext::
       SessionTicketKeysTypeCase::SESSION_TICKET_KEYS_TYPE_NOT_SET:
     return nullptr;
   default:
     throw EnvoyException(fmt::format("Unexpected case for oneof session_ticket_keys: {}",
                                      config.session_ticket_keys_type_case()));
+  }
+}
+
+bool getStatelessSessionResumptionDisabled(
+    const envoy::extensions::transport_sockets::tls::v3::DownstreamTlsContext& config) {
+  if (config.session_ticket_keys_type_case() ==
+      envoy::extensions::transport_sockets::tls::v3::DownstreamTlsContext::
+          SessionTicketKeysTypeCase::kDisableStatelessSessionResumption) {
+    return config.disable_stateless_session_resumption();
+  } else {
+    return false;
   }
 }
 
@@ -166,21 +181,33 @@ ContextConfigImpl::ContextConfigImpl(
                                                 default_min_protocol_version)),
       max_protocol_version_(tlsVersionFromProto(config.tls_params().tls_maximum_protocol_version(),
                                                 default_max_protocol_version)) {
-  if (default_cvc_ && certificate_validation_context_provider_ != nullptr) {
-    // We need to validate combined certificate validation context.
-    // The default certificate validation context and dynamic certificate validation
-    // context could only contain partial fields, which is okay to fail the validation.
-    // But the combined certificate validation context should pass validation. If
-    // validation of combined certificate validation context fails,
-    // getCombinedValidationContextConfig() throws exception, validation_context_config_ will not
-    // get updated.
-    cvc_validation_callback_handle_ =
-        certificate_validation_context_provider_->addValidationCallback(
-            [this](
-                const envoy::extensions::transport_sockets::tls::v3::CertificateValidationContext&
-                    dynamic_cvc) { getCombinedValidationContextConfig(dynamic_cvc); });
+  if (certificate_validation_context_provider_ != nullptr) {
+    if (default_cvc_) {
+      // We need to validate combined certificate validation context.
+      // The default certificate validation context and dynamic certificate validation
+      // context could only contain partial fields, which is okay to fail the validation.
+      // But the combined certificate validation context should pass validation. If
+      // validation of combined certificate validation context fails,
+      // getCombinedValidationContextConfig() throws exception, validation_context_config_ will not
+      // get updated.
+      cvc_validation_callback_handle_ =
+          certificate_validation_context_provider_->addValidationCallback(
+              [this](
+                  const envoy::extensions::transport_sockets::tls::v3::CertificateValidationContext&
+                      dynamic_cvc) { getCombinedValidationContextConfig(dynamic_cvc); });
+    }
+    // Load inlined, static or dynamic secret that's already available.
+    if (certificate_validation_context_provider_->secret() != nullptr) {
+      if (default_cvc_) {
+        validation_context_config_ =
+            getCombinedValidationContextConfig(*certificate_validation_context_provider_->secret());
+      } else {
+        validation_context_config_ = std::make_unique<Ssl::CertificateValidationContextConfigImpl>(
+            *certificate_validation_context_provider_->secret(), api_);
+      }
+    }
   }
-  // Load inline or static secret into tls_certificate_config_.
+  // Load inlined, static or dynamic secrets that are already available.
   if (!tls_certificate_providers_.empty()) {
     for (auto& provider : tls_certificate_providers_) {
       if (provider->secret() != nullptr) {
@@ -188,12 +215,25 @@ ContextConfigImpl::ContextConfigImpl(
       }
     }
   }
-  // Load inline or static secret into validation_context_config_.
-  if (certificate_validation_context_provider_ != nullptr &&
-      certificate_validation_context_provider_->secret() != nullptr) {
-    validation_context_config_ = std::make_unique<Ssl::CertificateValidationContextConfigImpl>(
-        *certificate_validation_context_provider_->secret(), api_);
+
+  HandshakerFactoryContextImpl handshaker_factory_context(api_, alpn_protocols_);
+  Ssl::HandshakerFactory* handshaker_factory;
+  if (config.has_custom_handshaker()) {
+    // If a custom handshaker is configured, derive the factory from the config.
+    const auto& handshaker_config = config.custom_handshaker();
+    handshaker_factory =
+        &Config::Utility::getAndCheckFactory<Ssl::HandshakerFactory>(handshaker_config);
+    handshaker_factory_cb_ = handshaker_factory->createHandshakerCb(
+        handshaker_config.typed_config(), handshaker_factory_context,
+        factory_context.messageValidationVisitor());
+  } else {
+    // Otherwise, derive the config from the default factory.
+    handshaker_factory = HandshakerFactoryImpl::getDefaultHandshakerFactory();
+    handshaker_factory_cb_ = handshaker_factory->createHandshakerCb(
+        *handshaker_factory->createEmptyConfigProto(), handshaker_factory_context,
+        factory_context.messageValidationVisitor());
   }
+  capabilities_ = handshaker_factory->capabilities();
 }
 
 Ssl::CertificateValidationContextConfigPtr ContextConfigImpl::getCombinedValidationContextConfig(
@@ -251,6 +291,10 @@ void ContextConfigImpl::setSecretUpdateCallback(std::function<void()> callback) 
   }
 }
 
+Ssl::HandshakerFactoryCb ContextConfigImpl::createHandshaker() const {
+  return handshaker_factory_cb_;
+}
+
 ContextConfigImpl::~ContextConfigImpl() {
   if (tc_update_callback_handle_) {
     tc_update_callback_handle_->remove();
@@ -278,10 +322,8 @@ unsigned ContextConfigImpl::tlsVersionFromProto(
   case envoy::extensions::transport_sockets::tls::v3::TlsParameters::TLSv1_3:
     return TLS1_3_VERSION;
   default:
-    NOT_IMPLEMENTED_GCOVR_EXCL_LINE;
+    NOT_REACHED_GCOVR_EXCL_LINE;
   }
-
-  NOT_REACHED_GCOVR_EXCL_LINE;
 }
 
 const unsigned ClientContextConfigImpl::DEFAULT_MIN_VERSION = TLS1_2_VERSION;
@@ -334,12 +376,7 @@ ClientContextConfigImpl::ClientContextConfigImpl(
 }
 
 const unsigned ServerContextConfigImpl::DEFAULT_MIN_VERSION = TLS1_VERSION;
-const unsigned ServerContextConfigImpl::DEFAULT_MAX_VERSION =
-#ifndef BORINGSSL_FIPS
-    TLS1_3_VERSION;
-#else // BoringSSL FIPS
-    TLS1_2_VERSION;
-#endif
+const unsigned ServerContextConfigImpl::DEFAULT_MAX_VERSION = TLS1_3_VERSION;
 
 const std::string ServerContextConfigImpl::DEFAULT_CIPHER_SUITES =
 #ifndef BORINGSSL_FIPS
@@ -373,28 +410,30 @@ ServerContextConfigImpl::ServerContextConfigImpl(
                         DEFAULT_CIPHER_SUITES, DEFAULT_CURVES, factory_context),
       require_client_certificate_(
           PROTOBUF_GET_WRAPPED_OR_DEFAULT(config, require_client_certificate, false)),
-      session_ticket_keys_provider_(
-          getTlsSessionTicketKeysConfigProvider(factory_context, config)) {
+      ocsp_staple_policy_(ocspStaplePolicyFromProto(config.ocsp_staple_policy())),
+      session_ticket_keys_provider_(getTlsSessionTicketKeysConfigProvider(factory_context, config)),
+      disable_stateless_session_resumption_(getStatelessSessionResumptionDisabled(config)) {
+
   if (session_ticket_keys_provider_ != nullptr) {
     // Validate tls session ticket keys early to reject bad sds updates.
     stk_validation_callback_handle_ = session_ticket_keys_provider_->addValidationCallback(
         [this](const envoy::extensions::transport_sockets::tls::v3::TlsSessionTicketKeys& keys) {
           getSessionTicketKeys(keys);
         });
+    // Load inlined, static or dynamic secret that's already available.
+    if (session_ticket_keys_provider_->secret() != nullptr) {
+      session_ticket_keys_ = getSessionTicketKeys(*session_ticket_keys_provider_->secret());
+    }
   }
 
-  // Load inline or static secrets.
-  if (session_ticket_keys_provider_ != nullptr &&
-      session_ticket_keys_provider_->secret() != nullptr) {
-    session_ticket_keys_ = getSessionTicketKeys(*session_ticket_keys_provider_->secret());
-  }
-
-  if ((config.common_tls_context().tls_certificates().size() +
-       config.common_tls_context().tls_certificate_sds_secret_configs().size()) == 0) {
-    throw EnvoyException("No TLS certificates found for server context");
-  } else if (!config.common_tls_context().tls_certificates().empty() &&
-             !config.common_tls_context().tls_certificate_sds_secret_configs().empty()) {
-    throw EnvoyException("SDS and non-SDS TLS certificates may not be mixed in server contexts");
+  if (!capabilities().provides_certificates) {
+    if ((config.common_tls_context().tls_certificates().size() +
+         config.common_tls_context().tls_certificate_sds_secret_configs().size()) == 0) {
+      throw EnvoyException("No TLS certificates found for server context");
+    } else if (!config.common_tls_context().tls_certificates().empty() &&
+               !config.common_tls_context().tls_certificate_sds_secret_configs().empty()) {
+      throw EnvoyException("SDS and non-SDS TLS certificates may not be mixed in server contexts");
+    }
   }
 
   if (config.has_session_timeout()) {
@@ -464,6 +503,21 @@ ServerContextConfigImpl::getSessionTicketKey(const std::string& key_data) {
   ASSERT(key_data.begin() + pos == key_data.end());
 
   return dst_key;
+}
+
+Ssl::ServerContextConfig::OcspStaplePolicy ServerContextConfigImpl::ocspStaplePolicyFromProto(
+    const envoy::extensions::transport_sockets::tls::v3::DownstreamTlsContext::OcspStaplePolicy&
+        policy) {
+  switch (policy) {
+  case envoy::extensions::transport_sockets::tls::v3::DownstreamTlsContext::LENIENT_STAPLING:
+    return Ssl::ServerContextConfig::OcspStaplePolicy::LenientStapling;
+  case envoy::extensions::transport_sockets::tls::v3::DownstreamTlsContext::STRICT_STAPLING:
+    return Ssl::ServerContextConfig::OcspStaplePolicy::StrictStapling;
+  case envoy::extensions::transport_sockets::tls::v3::DownstreamTlsContext::MUST_STAPLE:
+    return Ssl::ServerContextConfig::OcspStaplePolicy::MustStaple;
+  default:
+    NOT_REACHED_GCOVR_EXCL_LINE;
+  }
 }
 
 } // namespace Tls

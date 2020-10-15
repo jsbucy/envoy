@@ -40,7 +40,7 @@ void WatcherImpl::addWatch(absl::string_view path, uint32_t events, OnChangedCb 
   int watch_fd = inotify_add_watch(inotify_fd_, std::string(result.directory_).c_str(), watch_mask);
   if (watch_fd == -1) {
     throw EnvoyException(
-        fmt::format("unable to add filesystem watch for file {}: {}", path, strerror(errno)));
+        fmt::format("unable to add filesystem watch for file {}: {}", path, errorDetails(errno)));
   }
 
   ENVOY_LOG(debug, "added watch for directory: '{}' file: '{}' fd: {}", result.directory_,
@@ -80,9 +80,14 @@ void WatcherImpl::onInotifyEvent() {
       }
 
       for (FileWatch& watch : callback_map_[file_event->wd].watches_) {
-        if (watch.file_ == file && (watch.events_ & events)) {
-          ENVOY_LOG(debug, "matched callback: file: {}", file);
-          watch.cb_(events);
+        if (watch.events_ & events) {
+          if (watch.file_ == file) {
+            ENVOY_LOG(debug, "matched callback: file: {}", file);
+            watch.cb_(events);
+          } else if (watch.file_.empty()) {
+            ENVOY_LOG(debug, "matched callback: directory: {}", file);
+            watch.cb_(events);
+          }
         }
       }
 

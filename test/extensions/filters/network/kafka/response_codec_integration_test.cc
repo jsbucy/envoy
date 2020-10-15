@@ -2,7 +2,6 @@
 
 #include "test/extensions/filters/network/kafka/buffer_based_test.h"
 #include "test/extensions/filters/network/kafka/serialization_utilities.h"
-#include "test/mocks/server/mocks.h"
 
 #include "gtest/gtest.h"
 
@@ -19,7 +18,7 @@ using ResponseCapturingCallback =
     CapturingCallback<ResponseCallback, AbstractResponseSharedPtr, ResponseMetadataSharedPtr>;
 
 // Other response types are tested in (generated) 'response_codec_response_test.cc'.
-TEST_F(ResponseCodecIntegrationTest, shouldProduceAbortedMessageOnUnknownData) {
+TEST_F(ResponseCodecIntegrationTest, ShouldProduceAbortedMessageOnUnknownData) {
   // given
   const auto callback = std::make_shared<ResponseCapturingCallback>();
   ResponseDecoder testee{{callback}};
@@ -57,7 +56,7 @@ TEST_F(ResponseCodecIntegrationTest, shouldProduceAbortedMessageOnUnknownData) {
   }
 }
 
-TEST_F(ResponseCodecIntegrationTest, shouldThrowIfAttemptingToParseResponseButNothingIsExpected) {
+TEST_F(ResponseCodecIntegrationTest, ShouldThrowIfAttemptingToParseResponseButNothingIsExpected) {
   // given
   const auto callback = std::make_shared<ResponseCapturingCallback>();
   ResponseDecoder testee{{callback}};

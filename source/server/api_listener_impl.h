@@ -98,12 +98,16 @@ protected:
         return parent_.parent_.factory_context_.dispatcher();
       }
       uint64_t id() const override { return 12345; }
+      void hashKey(std::vector<uint8_t>&) const override {}
       std::string nextProtocol() const override { return EMPTY_STRING; }
       void noDelay(bool) override { NOT_IMPLEMENTED_GCOVR_EXCL_LINE; }
       void readDisable(bool) override {}
       void detectEarlyCloseWhenReadDisabled(bool) override { NOT_IMPLEMENTED_GCOVR_EXCL_LINE; }
       bool readEnabled() const override { return true; }
       const Network::Address::InstanceConstSharedPtr& remoteAddress() const override {
+        return parent_.parent_.address();
+      }
+      const Network::Address::InstanceConstSharedPtr& directRemoteAddress() const override {
         return parent_.parent_.address();
       }
       absl::optional<Network::Connection::UnixDomainSocketPeerCredentials>
@@ -129,6 +133,7 @@ protected:
       const StreamInfo::StreamInfo& streamInfo() const override { return stream_info_; }
       void setDelayedCloseTimeout(std::chrono::milliseconds) override {}
       absl::string_view transportFailureReason() const override { return EMPTY_STRING; }
+      absl::optional<std::chrono::milliseconds> lastRoundTripTime() const override { return {}; };
 
       SyntheticReadCallbacks& parent_;
       StreamInfo::StreamInfoImpl stream_info_;

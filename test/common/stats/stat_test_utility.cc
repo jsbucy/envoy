@@ -101,7 +101,7 @@ void forEachSampleStat(int num_clusters, std::function<void(absl::string_view)> 
 }
 
 MemoryTest::Mode MemoryTest::mode() {
-#if !defined(TCMALLOC) || defined(ENVOY_MEMORY_DEBUG_ENABLED)
+#if !(defined(TCMALLOC) || defined(GPERFTOOLS_TCMALLOC)) || defined(ENVOY_MEMORY_DEBUG_ENABLED)
   // We can only test absolute memory usage if the malloc library is a known
   // quantity. This decision is centralized here. As the preferred malloc
   // library for Envoy is TCMALLOC that's what we test for here. If we switch
@@ -119,32 +119,38 @@ MemoryTest::Mode MemoryTest::mode() {
   const size_t end_mem = Memory::Stats::totalCurrentlyAllocated();
   bool can_measure_memory = end_mem > start_mem;
 
+  // As of Oct 8, 2020, tcmalloc has changed such that Memory::Stats::totalCurrentlyAllocated
+  // is not deterministic, even with single-threaded tests. When possible, this should be fixed,
+  // and the following block of code uncommented. This affects approximate comparisons, not
+  // just exact ones.
+#if 0
   if (getenv("ENVOY_MEMORY_TEST_EXACT") != nullptr) { // Set in "ci/do_ci.sh" for 'release' tests.
     RELEASE_ASSERT(can_measure_memory,
                    "$ENVOY_MEMORY_TEST_EXACT is set for canonical memory measurements, "
                    "but memory measurement looks broken");
     return Mode::Canonical;
-  } else {
-    // Different versions of STL and other compiler/architecture differences may
-    // also impact memory usage, so when not compiling with MEMORY_TEST_EXACT,
-    // memory comparisons must be given some slack. There have recently emerged
-    // some memory-allocation differences between development and Envoy CI and
-    // Bazel CI (which compiles Envoy as a test of Bazel).
-    return can_measure_memory ? Mode::Approximate : Mode::Disabled;
   }
+#endif
+
+  // Different versions of STL and other compiler/architecture differences may
+  // also impact memory usage, so when not compiling with MEMORY_TEST_EXACT,
+  // memory comparisons must be given some slack. There have recently emerged
+  // some memory-allocation differences between development and Envoy CI and
+  // Bazel CI (which compiles Envoy as a test of Bazel).
+  return can_measure_memory ? Mode::Approximate : Mode::Disabled;
 #endif
 }
 
-Counter& TestStore::counter(const std::string& name) {
+Counter& TestStore::counterFromString(const std::string& name) {
   Counter*& counter_ref = counter_map_[name];
   if (counter_ref == nullptr) {
-    counter_ref = &IsolatedStoreImpl::counter(name);
+    counter_ref = &IsolatedStoreImpl::counterFromString(name);
   }
   return *counter_ref;
 }
 
 Counter& TestStore::counterFromStatNameWithTags(const StatName& stat_name,
-                                                StatNameTagVectorOptRef tags) {
+                                                StatNameTagVectorOptConstRef tags) {
   std::string name = symbolTable().toString(stat_name);
   Counter*& counter_ref = counter_map_[name];
   if (counter_ref == nullptr) {
@@ -152,56 +158,63 @@ Counter& TestStore::counterFromStatNameWithTags(const StatName& stat_name,
   } else {
     // Ensures StatNames with the same string representation are specified
     // consistently using symbolic/dynamic components on every access.
-    ASSERT(counter_ref->statName() == stat_name);
+    ASSERT(counter_ref->statName() == stat_name, "Inconsistent dynamic vs symbolic "
+                                                 "stat name specification");
   }
   return *counter_ref;
 }
 
-Gauge& TestStore::gauge(const std::string& name, Gauge::ImportMode mode) {
+Gauge& TestStore::gaugeFromString(const std::string& name, Gauge::ImportMode mode) {
   Gauge*& gauge_ref = gauge_map_[name];
   if (gauge_ref == nullptr) {
-    gauge_ref = &IsolatedStoreImpl::gauge(name, mode);
+    gauge_ref = &IsolatedStoreImpl::gaugeFromString(name, mode);
   }
   return *gauge_ref;
 }
 
-Gauge& TestStore::gaugeFromStatNameWithTags(const StatName& stat_name, StatNameTagVectorOptRef tags,
+Gauge& TestStore::gaugeFromStatNameWithTags(const StatName& stat_name,
+                                            StatNameTagVectorOptConstRef tags,
                                             Gauge::ImportMode mode) {
   std::string name = symbolTable().toString(stat_name);
   Gauge*& gauge_ref = gauge_map_[name];
   if (gauge_ref == nullptr) {
     gauge_ref = &IsolatedStoreImpl::gaugeFromStatNameWithTags(stat_name, tags, mode);
   } else {
-    ASSERT(gauge_ref->statName() == stat_name);
+    ASSERT(gauge_ref->statName() == stat_name, "Inconsistent dynamic vs symbolic "
+                                               "stat name specification");
   }
   return *gauge_ref;
 }
 
-Histogram& TestStore::histogram(const std::string& name, Histogram::Unit unit) {
+Histogram& TestStore::histogramFromString(const std::string& name, Histogram::Unit unit) {
   Histogram*& histogram_ref = histogram_map_[name];
   if (histogram_ref == nullptr) {
-    histogram_ref = &IsolatedStoreImpl::histogram(name, unit);
+    histogram_ref = &IsolatedStoreImpl::histogramFromString(name, unit);
   }
   return *histogram_ref;
 }
 
 Histogram& TestStore::histogramFromStatNameWithTags(const StatName& stat_name,
-                                                    StatNameTagVectorOptRef tags,
+                                                    StatNameTagVectorOptConstRef tags,
                                                     Histogram::Unit unit) {
   std::string name = symbolTable().toString(stat_name);
   Histogram*& histogram_ref = histogram_map_[name];
   if (histogram_ref == nullptr) {
     histogram_ref = &IsolatedStoreImpl::histogramFromStatNameWithTags(stat_name, tags, unit);
   } else {
-    ASSERT(histogram_ref->statName() == stat_name);
+    ASSERT(histogram_ref->statName() == stat_name, "Inconsistent dynamic vs symbolic "
+                                                   "stat name specification");
   }
   return *histogram_ref;
 }
 
 template <class StatType>
-static absl::optional<std::reference_wrapper<const StatType>>
+using StatTypeOptConstRef = absl::optional<std::reference_wrapper<const StatType>>;
+
+template <class StatType>
+static StatTypeOptConstRef<StatType>
 findByString(const std::string& name, const absl::flat_hash_map<std::string, StatType*>& map) {
-  absl::optional<std::reference_wrapper<const StatType>> ret;
+  StatTypeOptConstRef<StatType> ret;
   auto iter = map.find(name);
   if (iter != map.end()) {
     ret = *iter->second;

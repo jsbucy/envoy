@@ -50,8 +50,11 @@ public:
   ~RemoteDataFetcher() override;
 
   // Http::AsyncClient::Callbacks
-  void onSuccess(Http::ResponseMessagePtr&& response) override;
-  void onFailure(Http::AsyncClient::FailureReason reason) override;
+  void onSuccess(const Http::AsyncClient::Request&, Http::ResponseMessagePtr&& response) override;
+  void onFailure(const Http::AsyncClient::Request&,
+                 Http::AsyncClient::FailureReason reason) override;
+  void onBeforeFinalizeUpstreamSpan(Envoy::Tracing::Span&,
+                                    const Http::ResponseHeaderMap*) override {}
 
   /**
    * Fetch data from remote.

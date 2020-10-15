@@ -2,13 +2,16 @@
 
 #include "envoy/config/listener/v3/listener_components.pb.h"
 
+#include "common/common/cleanup.h"
 #include "common/common/empty_string.h"
 #include "common/common/fmt.h"
 #include "common/config/utility.h"
+#include "common/network/socket_interface.h"
 #include "common/protobuf/utility.h"
 
 #include "server/configuration_impl.h"
 
+#include "absl/container/node_hash_map.h"
 #include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
 
@@ -25,113 +28,114 @@ Network::Address::InstanceConstSharedPtr fakeAddress() {
 
 } // namespace
 
-FilterChainFactoryContextImpl::FilterChainFactoryContextImpl(
-    Configuration::FactoryContext& parent_context)
-    : parent_context_(parent_context) {}
+PerFilterChainFactoryContextImpl::PerFilterChainFactoryContextImpl(
+    Configuration::FactoryContext& parent_context, Init::Manager& init_manager)
+    : parent_context_(parent_context), init_manager_(init_manager) {}
 
-bool FilterChainFactoryContextImpl::drainClose() const {
-  // TODO(lambdai): will provide individual value for each filter chain context.
-  return parent_context_.drainDecision().drainClose();
+bool PerFilterChainFactoryContextImpl::drainClose() const {
+  return is_draining_.load() || parent_context_.drainDecision().drainClose();
 }
 
-Network::DrainDecision& FilterChainFactoryContextImpl::drainDecision() { return *this; }
+Network::DrainDecision& PerFilterChainFactoryContextImpl::drainDecision() { return *this; }
 
-// TODO(lambdai): init manager will be provided for each filter chain update.
-Init::Manager& FilterChainFactoryContextImpl::initManager() {
-  return parent_context_.initManager();
-}
+Init::Manager& PerFilterChainFactoryContextImpl::initManager() { return init_manager_; }
 
-ThreadLocal::SlotAllocator& FilterChainFactoryContextImpl::threadLocal() {
+ThreadLocal::SlotAllocator& PerFilterChainFactoryContextImpl::threadLocal() {
   return parent_context_.threadLocal();
 }
 
-const envoy::config::core::v3::Metadata& FilterChainFactoryContextImpl::listenerMetadata() const {
+const envoy::config::core::v3::Metadata&
+PerFilterChainFactoryContextImpl::listenerMetadata() const {
   return parent_context_.listenerMetadata();
 }
 
-envoy::config::core::v3::TrafficDirection FilterChainFactoryContextImpl::direction() const {
+envoy::config::core::v3::TrafficDirection PerFilterChainFactoryContextImpl::direction() const {
   return parent_context_.direction();
 }
 
-ProtobufMessage::ValidationVisitor& FilterChainFactoryContextImpl::messageValidationVisitor() {
+ProtobufMessage::ValidationContext& PerFilterChainFactoryContextImpl::messageValidationContext() {
+  return parent_context_.messageValidationContext();
+}
+ProtobufMessage::ValidationVisitor& PerFilterChainFactoryContextImpl::messageValidationVisitor() {
   return parent_context_.messageValidationVisitor();
 }
 
-AccessLog::AccessLogManager& FilterChainFactoryContextImpl::accessLogManager() {
+AccessLog::AccessLogManager& PerFilterChainFactoryContextImpl::accessLogManager() {
   return parent_context_.accessLogManager();
 }
 
-Upstream::ClusterManager& FilterChainFactoryContextImpl::clusterManager() {
+Upstream::ClusterManager& PerFilterChainFactoryContextImpl::clusterManager() {
   return parent_context_.clusterManager();
 }
 
-Event::Dispatcher& FilterChainFactoryContextImpl::dispatcher() {
+Event::Dispatcher& PerFilterChainFactoryContextImpl::dispatcher() {
   return parent_context_.dispatcher();
 }
 
-Grpc::Context& FilterChainFactoryContextImpl::grpcContext() {
+Grpc::Context& PerFilterChainFactoryContextImpl::grpcContext() {
   return parent_context_.grpcContext();
 }
 
-bool FilterChainFactoryContextImpl::healthCheckFailed() {
+bool PerFilterChainFactoryContextImpl::healthCheckFailed() {
   return parent_context_.healthCheckFailed();
 }
 
-Tracing::HttpTracer& FilterChainFactoryContextImpl::httpTracer() { return httpContext().tracer(); }
-
-Http::Context& FilterChainFactoryContextImpl::httpContext() {
+Http::Context& PerFilterChainFactoryContextImpl::httpContext() {
   return parent_context_.httpContext();
 }
 
-const LocalInfo::LocalInfo& FilterChainFactoryContextImpl::localInfo() const {
+const LocalInfo::LocalInfo& PerFilterChainFactoryContextImpl::localInfo() const {
   return parent_context_.localInfo();
 }
 
-Envoy::Runtime::RandomGenerator& FilterChainFactoryContextImpl::random() {
-  return parent_context_.random();
-}
-
-Envoy::Runtime::Loader& FilterChainFactoryContextImpl::runtime() {
+Envoy::Runtime::Loader& PerFilterChainFactoryContextImpl::runtime() {
   return parent_context_.runtime();
 }
 
-Stats::Scope& FilterChainFactoryContextImpl::scope() { return parent_context_.scope(); }
+Stats::Scope& PerFilterChainFactoryContextImpl::scope() { return parent_context_.scope(); }
 
-Singleton::Manager& FilterChainFactoryContextImpl::singletonManager() {
+Singleton::Manager& PerFilterChainFactoryContextImpl::singletonManager() {
   return parent_context_.singletonManager();
 }
 
-OverloadManager& FilterChainFactoryContextImpl::overloadManager() {
+OverloadManager& PerFilterChainFactoryContextImpl::overloadManager() {
   return parent_context_.overloadManager();
 }
 
-Admin& FilterChainFactoryContextImpl::admin() { return parent_context_.admin(); }
+Admin& PerFilterChainFactoryContextImpl::admin() { return parent_context_.admin(); }
 
-TimeSource& FilterChainFactoryContextImpl::timeSource() { return api().timeSource(); }
+TimeSource& PerFilterChainFactoryContextImpl::timeSource() { return api().timeSource(); }
 
-Api::Api& FilterChainFactoryContextImpl::api() { return parent_context_.api(); }
+Api::Api& PerFilterChainFactoryContextImpl::api() { return parent_context_.api(); }
 
-ServerLifecycleNotifier& FilterChainFactoryContextImpl::lifecycleNotifier() {
+ServerLifecycleNotifier& PerFilterChainFactoryContextImpl::lifecycleNotifier() {
   return parent_context_.lifecycleNotifier();
 }
 
-ProcessContextOptRef FilterChainFactoryContextImpl::processContext() {
+ProcessContextOptRef PerFilterChainFactoryContextImpl::processContext() {
   return parent_context_.processContext();
 }
 
 Configuration::ServerFactoryContext&
-FilterChainFactoryContextImpl::getServerFactoryContext() const {
+PerFilterChainFactoryContextImpl::getServerFactoryContext() const {
   return parent_context_.getServerFactoryContext();
 }
 
 Configuration::TransportSocketFactoryContext&
-FilterChainFactoryContextImpl::getTransportSocketFactoryContext() const {
+PerFilterChainFactoryContextImpl::getTransportSocketFactoryContext() const {
   return parent_context_.getTransportSocketFactoryContext();
 }
 
-Stats::Scope& FilterChainFactoryContextImpl::listenerScope() {
+Stats::Scope& PerFilterChainFactoryContextImpl::listenerScope() {
   return parent_context_.listenerScope();
 }
+
+FilterChainManagerImpl::FilterChainManagerImpl(
+    const Network::Address::InstanceConstSharedPtr& address,
+    Configuration::FactoryContext& factory_context, Init::Manager& init_manager,
+    const FilterChainManagerImpl& parent_manager)
+    : address_(address), parent_context_(factory_context), origin_(&parent_manager),
+      init_manager_(init_manager) {}
 
 bool FilterChainManagerImpl::isWildcardServerName(const std::string& name) {
   return absl::StartsWith(name, "*.");
@@ -141,21 +145,26 @@ void FilterChainManagerImpl::addFilterChain(
     absl::Span<const envoy::config::listener::v3::FilterChain* const> filter_chain_span,
     FilterChainFactoryBuilder& filter_chain_factory_builder,
     FilterChainFactoryContextCreator& context_creator) {
-  std::unordered_set<envoy::config::listener::v3::FilterChainMatch, MessageUtil, MessageUtil>
+  Cleanup cleanup([this]() { origin_ = absl::nullopt; });
+  absl::node_hash_map<envoy::config::listener::v3::FilterChainMatch, std::string, MessageUtil,
+                      MessageUtil>
       filter_chains;
+  uint32_t new_filter_chain_size = 0;
   for (const auto& filter_chain : filter_chain_span) {
     const auto& filter_chain_match = filter_chain->filter_chain_match();
     if (!filter_chain_match.address_suffix().empty() || filter_chain_match.has_suffix_len()) {
-      throw EnvoyException(fmt::format("error adding listener '{}': contains filter chains with "
+      throw EnvoyException(fmt::format("error adding listener '{}': filter chain '{}' contains "
                                        "unimplemented fields",
-                                       address_->asString()));
+                                       address_->asString(), filter_chain->name()));
     }
-    if (filter_chains.find(filter_chain_match) != filter_chains.end()) {
-      throw EnvoyException(fmt::format("error adding listener '{}': multiple filter chains with "
-                                       "the same matching rules are defined",
-                                       address_->asString()));
+    const auto& matching_iter = filter_chains.find(filter_chain_match);
+    if (matching_iter != filter_chains.end()) {
+      throw EnvoyException(fmt::format("error adding listener '{}': filter chain '{}' has "
+                                       "the same matching rules defined as '{}'",
+                                       address_->asString(), filter_chain->name(),
+                                       matching_iter->second));
     }
-    filter_chains.insert(filter_chain_match);
+    filter_chains.insert({filter_chain_match, filter_chain->name()});
 
     // Validate IP addresses.
     std::vector<std::string> destination_ips;
@@ -183,16 +192,27 @@ void FilterChainManagerImpl::addFilterChain(
       }
     }
 
+    // Reuse created filter chain if possible.
+    // FilterChainManager maintains the lifetime of FilterChainFactoryContext
+    // ListenerImpl maintains the dependencies of FilterChainFactoryContext
+    auto filter_chain_impl = findExistingFilterChain(*filter_chain);
+    if (filter_chain_impl == nullptr) {
+      filter_chain_impl =
+          filter_chain_factory_builder.buildFilterChain(*filter_chain, context_creator);
+      ++new_filter_chain_size;
+    }
+
     addFilterChainForDestinationPorts(
         destination_ports_map_,
         PROTOBUF_GET_WRAPPED_OR_DEFAULT(filter_chain_match, destination_port, 0), destination_ips,
         filter_chain_match.server_names(), filter_chain_match.transport_protocol(),
         filter_chain_match.application_protocols(), filter_chain_match.source_type(), source_ips,
-        filter_chain_match.source_ports(),
-        std::shared_ptr<Network::FilterChain>(
-            filter_chain_factory_builder.buildFilterChain(*filter_chain, context_creator)));
+        filter_chain_match.source_ports(), filter_chain_impl);
+    fc_contexts_[*filter_chain] = filter_chain_impl;
   }
   convertIPsToTries();
+  ENVOY_LOG(debug, "new fc_contexts has {} filter chains, including {} newly built",
+            fc_contexts_.size(), new_filter_chain_size);
 }
 
 void FilterChainManagerImpl::addFilterChainForDestinationPorts(
@@ -341,11 +361,11 @@ std::pair<T, std::vector<Network::Address::CidrRange>> makeCidrListEntry(const s
                                                                          const T& data) {
   std::vector<Network::Address::CidrRange> subnets;
   if (cidr == EMPTY_STRING) {
-    if (Network::Address::ipFamilySupported(AF_INET)) {
+    if (Network::SocketInterfaceSingleton::get().ipFamilySupported(AF_INET)) {
       subnets.push_back(
           Network::Address::CidrRange::create(Network::Utility::getIpv4CidrCatchAllAddress()));
     }
-    if (Network::Address::ipFamilySupported(AF_INET6)) {
+    if (Network::SocketInterfaceSingleton::get().ipFamilySupported(AF_INET6)) {
       subnets.push_back(
           Network::Address::CidrRange::create(Network::Utility::getIpv6CidrCatchAllAddress()));
     }
@@ -534,51 +554,64 @@ const Network::FilterChain* FilterChainManagerImpl::findFilterChainForSourceIpAn
 }
 
 void FilterChainManagerImpl::convertIPsToTries() {
-  for (auto& port : destination_ports_map_) {
+  for (auto& [destination_port, destination_ips_pair] : destination_ports_map_) {
     // These variables are used as we build up the destination CIDRs used for the trie.
-    auto& destination_ips_pair = port.second;
-    auto& destination_ips_map = destination_ips_pair.first;
+    auto& [destination_ips_map, destination_ips_trie] = destination_ips_pair;
     std::vector<std::pair<ServerNamesMapSharedPtr, std::vector<Network::Address::CidrRange>>>
         destination_ips_list;
     destination_ips_list.reserve(destination_ips_map.size());
 
-    for (const auto& entry : destination_ips_map) {
-      destination_ips_list.push_back(makeCidrListEntry(entry.first, entry.second));
+    for (const auto& [destination_ip, server_names_map_ptr] : destination_ips_map) {
+      destination_ips_list.push_back(makeCidrListEntry(destination_ip, server_names_map_ptr));
 
       // This hugely nested for loop greatly pains me, but I'm not sure how to make it better.
       // We need to get access to all of the source IP strings so that we can convert them into
       // a trie like we did for the destination IPs above.
-      for (auto& server_names_entry : *entry.second) {
-        for (auto& transport_protocols_entry : server_names_entry.second) {
-          for (auto& application_protocols_entry : transport_protocols_entry.second) {
-            for (auto& source_array_entry : application_protocols_entry.second) {
-              auto& source_ips_map = source_array_entry.first;
+      for (auto& [server_name, transport_protocols_map] : *server_names_map_ptr) {
+        for (auto& [transport_protocol, application_protocols_map] : transport_protocols_map) {
+          for (auto& [application_protocol, source_arrays] : application_protocols_map) {
+            for (auto& [source_ips_map, source_ips_trie] : source_arrays) {
               std::vector<
                   std::pair<SourcePortsMapSharedPtr, std::vector<Network::Address::CidrRange>>>
                   source_ips_list;
               source_ips_list.reserve(source_ips_map.size());
 
-              for (auto& source_ip : source_ips_map) {
-                source_ips_list.push_back(makeCidrListEntry(source_ip.first, source_ip.second));
+              for (auto& [source_ip, source_port_map_ptr] : source_ips_map) {
+                source_ips_list.push_back(makeCidrListEntry(source_ip, source_port_map_ptr));
               }
 
-              source_array_entry.second = std::make_unique<SourceIPsTrie>(source_ips_list, true);
+              source_ips_trie = std::make_unique<SourceIPsTrie>(source_ips_list, true);
             }
           }
         }
       }
     }
 
-    destination_ips_pair.second = std::make_unique<DestinationIPsTrie>(destination_ips_list, true);
+    destination_ips_trie = std::make_unique<DestinationIPsTrie>(destination_ips_list, true);
   }
 }
 
-Configuration::FilterChainFactoryContext& FilterChainManagerImpl::createFilterChainFactoryContext(
+Network::DrainableFilterChainSharedPtr FilterChainManagerImpl::findExistingFilterChain(
+    const envoy::config::listener::v3::FilterChain& filter_chain_message) {
+  // Origin filter chain manager could be empty if the current is the ancestor.
+  const auto* origin = getOriginFilterChainManager();
+  if (origin == nullptr) {
+    return nullptr;
+  }
+  auto iter = origin->fc_contexts_.find(filter_chain_message);
+  if (iter != origin->fc_contexts_.end()) {
+    // copy the context to this filter chain manager.
+    fc_contexts_.emplace(filter_chain_message, iter->second);
+    return iter->second;
+  }
+  return nullptr;
+}
+
+Configuration::FilterChainFactoryContextPtr FilterChainManagerImpl::createFilterChainFactoryContext(
     const ::envoy::config::listener::v3::FilterChain* const filter_chain) {
-  // TODO(lambdai): drain close should be saved in per filter chain context
+  // TODO(lambdai): add stats
   UNREFERENCED_PARAMETER(filter_chain);
-  factory_contexts_.push_back(std::make_unique<FilterChainFactoryContextImpl>(parent_context_));
-  return *factory_contexts_.back();
+  return std::make_unique<PerFilterChainFactoryContextImpl>(parent_context_, init_manager_);
 }
 
 FactoryContextImpl::FactoryContextImpl(Server::Instance& server,
@@ -595,11 +628,9 @@ Upstream::ClusterManager& FactoryContextImpl::clusterManager() { return server_.
 Event::Dispatcher& FactoryContextImpl::dispatcher() { return server_.dispatcher(); }
 Grpc::Context& FactoryContextImpl::grpcContext() { return server_.grpcContext(); }
 bool FactoryContextImpl::healthCheckFailed() { return server_.healthCheckFailed(); }
-Tracing::HttpTracer& FactoryContextImpl::httpTracer() { return server_.httpContext().tracer(); }
 Http::Context& FactoryContextImpl::httpContext() { return server_.httpContext(); }
 Init::Manager& FactoryContextImpl::initManager() { return server_.initManager(); }
 const LocalInfo::LocalInfo& FactoryContextImpl::localInfo() const { return server_.localInfo(); }
-Envoy::Runtime::RandomGenerator& FactoryContextImpl::random() { return server_.random(); }
 Envoy::Runtime::Loader& FactoryContextImpl::runtime() { return server_.runtime(); }
 Stats::Scope& FactoryContextImpl::scope() { return global_scope_; }
 Singleton::Manager& FactoryContextImpl::singletonManager() { return server_.singletonManager(); }
@@ -607,6 +638,9 @@ OverloadManager& FactoryContextImpl::overloadManager() { return server_.overload
 ThreadLocal::SlotAllocator& FactoryContextImpl::threadLocal() { return server_.threadLocal(); }
 Admin& FactoryContextImpl::admin() { return server_.admin(); }
 TimeSource& FactoryContextImpl::timeSource() { return server_.timeSource(); }
+ProtobufMessage::ValidationContext& FactoryContextImpl::messageValidationContext() {
+  return server_.messageValidationContext();
+}
 ProtobufMessage::ValidationVisitor& FactoryContextImpl::messageValidationVisitor() {
   return server_.messageValidationContext().staticValidationVisitor();
 }

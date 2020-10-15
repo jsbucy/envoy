@@ -5,7 +5,6 @@
 #include "common/common/logger.h"
 #include "common/memory/stats.h"
 #include "common/stats/isolated_store_impl.h"
-#include "common/stats/symbol_table_creator.h"
 
 #include "absl/strings/str_join.h"
 #include "absl/strings/string_view.h"
@@ -90,10 +89,19 @@ private:
 // and symbol strings as production.
 class TestStore : public IsolatedStoreImpl {
 public:
-  TestStore() {}
+  TestStore() = default;
 
   // Constructs a store using a symbol table, allowing for explicit sharing.
   explicit TestStore(SymbolTable& symbol_table) : IsolatedStoreImpl(symbol_table) {}
+
+  Counter& counter(const std::string& name) { return counterFromString(name); }
+  Gauge& gauge(const std::string& name, Gauge::ImportMode import_mode) {
+    return gaugeFromString(name, import_mode);
+  }
+  Histogram& histogram(const std::string& name, Histogram::Unit unit) {
+    return histogramFromString(name, unit);
+  }
+  TextReadout& textReadout(const std::string& name) { return textReadoutFromString(name); }
 
   // Override the Stats::Store methods for name-based lookup of stats, to use
   // and update the string-maps in this class. Note that IsolatedStoreImpl
@@ -101,13 +109,14 @@ public:
   // to keep the maps up-to-date.
   //
   // Stats::Scope
-  Counter& counter(const std::string& name) override;
-  Gauge& gauge(const std::string& name, Gauge::ImportMode import_mode) override;
-  Histogram& histogram(const std::string& name, Histogram::Unit unit) override;
-  Counter& counterFromStatNameWithTags(const StatName& name, StatNameTagVectorOptRef tags) override;
-  Gauge& gaugeFromStatNameWithTags(const StatName& name, StatNameTagVectorOptRef tags,
+  Counter& counterFromString(const std::string& name) override;
+  Gauge& gaugeFromString(const std::string& name, Gauge::ImportMode import_mode) override;
+  Histogram& histogramFromString(const std::string& name, Histogram::Unit unit) override;
+  Counter& counterFromStatNameWithTags(const StatName& name,
+                                       StatNameTagVectorOptConstRef tags) override;
+  Gauge& gaugeFromStatNameWithTags(const StatName& name, StatNameTagVectorOptConstRef tags,
                                    Gauge::ImportMode import_mode) override;
-  Histogram& histogramFromStatNameWithTags(const StatName& name, StatNameTagVectorOptRef tags,
+  Histogram& histogramFromStatNameWithTags(const StatName& name, StatNameTagVectorOptConstRef tags,
                                            Histogram::Unit unit) override;
 
   // New APIs available for tests.
@@ -153,13 +162,6 @@ private:
           upper_bound);                                                                            \
     }                                                                                              \
   } while (false)
-
-class SymbolTableCreatorTestPeer {
-public:
-  static void setUseFakeSymbolTables(bool use_fakes) {
-    SymbolTableCreator::setUseFakeSymbolTables(use_fakes);
-  }
-};
 
 // Serializes a number into a uint8_t array, and check that it de-serializes to
 // the same number. The serialized number is also returned, which can be
