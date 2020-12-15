@@ -24,6 +24,7 @@
 #include "gtest/gtest.h"
 
 using testing::_;
+using testing::AtLeast;
 using testing::Invoke;
 using testing::MatchesRegex;
 using testing::NiceMock;
@@ -92,6 +93,25 @@ TEST_P(TcpProxyIntegrationTest, TcpProxyUpstreamWritesFirst) {
   ASSERT_TRUE(fake_upstream_connection->waitForDisconnect());
 }
 
+// Test TLS upstream.
+TEST_P(TcpProxyIntegrationTest, TcpProxyUpstreamTls) {
+  upstream_tls_ = true;
+  config_helper_.configureUpstreamTls();
+  initialize();
+  IntegrationTcpClientPtr tcp_client = makeTcpConnection(lookupPort("tcp_proxy"));
+  ASSERT_TRUE(tcp_client->write("hello"));
+  FakeRawConnectionPtr fake_upstream_connection;
+  ASSERT_TRUE(fake_upstreams_[0]->waitForRawConnection(fake_upstream_connection));
+  ASSERT_TRUE(fake_upstream_connection->waitForData(5));
+  ASSERT_TRUE(fake_upstream_connection->write("world"));
+  ASSERT_TRUE(fake_upstream_connection->close());
+  ASSERT_TRUE(fake_upstream_connection->waitForDisconnect());
+  tcp_client->waitForHalfClose();
+  tcp_client->close();
+
+  EXPECT_EQ("world", tcp_client->data());
+}
+
 // Test proxying data in both directions, and that all data is flushed properly
 // when there is an upstream disconnect.
 TEST_P(TcpProxyIntegrationTest, TcpProxyUpstreamDisconnect) {
@@ -141,7 +161,7 @@ TEST_P(TcpProxyIntegrationTest, NoUpstream) {
     lb_endpoint->mutable_endpoint()->mutable_address()->mutable_socket_address()->set_port_value(1);
   });
   config_helper_.skipPortUsageValidation();
-  enable_half_close_ = false;
+  enableHalfClose(false);
   initialize();
 
   IntegrationTcpClientPtr tcp_client = makeTcpConnection(lookupPort("tcp_proxy"));
@@ -287,9 +307,10 @@ TEST_P(TcpProxyIntegrationTest, AccessLog) {
     auto* config_blob = filter_chain->mutable_filters(0)->mutable_typed_config();
 
     ASSERT_TRUE(
-        config_blob->Is<API_NO_BOOST(envoy::config::filter::network::tcp_proxy::v2::TcpProxy)>());
+        config_blob
+            ->Is<API_NO_BOOST(envoy::extensions::filters::network::tcp_proxy::v3::TcpProxy)>());
     auto tcp_proxy_config = MessageUtil::anyConvert<API_NO_BOOST(
-        envoy::config::filter::network::tcp_proxy::v2::TcpProxy)>(*config_blob);
+        envoy::extensions::filters::network::tcp_proxy::v3::TcpProxy)>(*config_blob);
 
     auto* access_log = tcp_proxy_config.add_access_log();
     access_log->set_name("accesslog");
@@ -304,8 +325,8 @@ TEST_P(TcpProxyIntegrationTest, AccessLog) {
     runtime_filter->set_runtime_key("unused-key");
     auto* percent_sampled = runtime_filter->mutable_percent_sampled();
     percent_sampled->set_numerator(100);
-    percent_sampled->set_denominator(
-        envoy::type::FractionalPercent::DenominatorType::FractionalPercent_DenominatorType_HUNDRED);
+    percent_sampled->set_denominator(envoy::type::v3::FractionalPercent::DenominatorType::
+                                         FractionalPercent_DenominatorType_HUNDRED);
     config_blob->PackFrom(tcp_proxy_config);
   });
   initialize();
@@ -383,16 +404,17 @@ TEST_P(TcpProxyIntegrationTest, ShutdownWithOpenConnections) {
 TEST_P(TcpProxyIntegrationTest, TestIdletimeoutWithNoData) {
   autonomous_upstream_ = true;
 
-  enable_half_close_ = false;
+  enableHalfClose(false);
   config_helper_.addConfigModifier([&](envoy::config::bootstrap::v3::Bootstrap& bootstrap) -> void {
     auto* listener = bootstrap.mutable_static_resources()->mutable_listeners(0);
     auto* filter_chain = listener->mutable_filter_chains(0);
     auto* config_blob = filter_chain->mutable_filters(0)->mutable_typed_config();
 
     ASSERT_TRUE(
-        config_blob->Is<API_NO_BOOST(envoy::config::filter::network::tcp_proxy::v2::TcpProxy)>());
+        config_blob
+            ->Is<API_NO_BOOST(envoy::extensions::filters::network::tcp_proxy::v3::TcpProxy)>());
     auto tcp_proxy_config = MessageUtil::anyConvert<API_NO_BOOST(
-        envoy::config::filter::network::tcp_proxy::v2::TcpProxy)>(*config_blob);
+        envoy::extensions::filters::network::tcp_proxy::v3::TcpProxy)>(*config_blob);
     tcp_proxy_config.mutable_idle_timeout()->set_nanos(
         std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::milliseconds(100))
             .count());
@@ -406,16 +428,17 @@ TEST_P(TcpProxyIntegrationTest, TestIdletimeoutWithNoData) {
 
 TEST_P(TcpProxyIntegrationTest, TestIdletimeoutWithLargeOutstandingData) {
   config_helper_.setBufferLimits(1024, 1024);
-  enable_half_close_ = false;
+  enableHalfClose(false);
   config_helper_.addConfigModifier([&](envoy::config::bootstrap::v3::Bootstrap& bootstrap) -> void {
     auto* listener = bootstrap.mutable_static_resources()->mutable_listeners(0);
     auto* filter_chain = listener->mutable_filter_chains(0);
     auto* config_blob = filter_chain->mutable_filters(0)->mutable_typed_config();
 
     ASSERT_TRUE(
-        config_blob->Is<API_NO_BOOST(envoy::config::filter::network::tcp_proxy::v2::TcpProxy)>());
+        config_blob
+            ->Is<API_NO_BOOST(envoy::extensions::filters::network::tcp_proxy::v3::TcpProxy)>());
     auto tcp_proxy_config = MessageUtil::anyConvert<API_NO_BOOST(
-        envoy::config::filter::network::tcp_proxy::v2::TcpProxy)>(*config_blob);
+        envoy::extensions::filters::network::tcp_proxy::v3::TcpProxy)>(*config_blob);
     tcp_proxy_config.mutable_idle_timeout()->set_nanos(
         std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::milliseconds(500))
             .count());
@@ -438,14 +461,15 @@ TEST_P(TcpProxyIntegrationTest, TestIdletimeoutWithLargeOutstandingData) {
 TEST_P(TcpProxyIntegrationTest, TestMaxDownstreamConnectionDurationWithNoData) {
   autonomous_upstream_ = true;
 
-  enable_half_close_ = false;
+  enableHalfClose(false);
   config_helper_.addConfigModifier([&](envoy::config::bootstrap::v3::Bootstrap& bootstrap) -> void {
     auto* listener = bootstrap.mutable_static_resources()->mutable_listeners(0);
     auto* filter_chain = listener->mutable_filter_chains(0);
     auto* config_blob = filter_chain->mutable_filters(0)->mutable_typed_config();
 
     ASSERT_TRUE(
-        config_blob->Is<API_NO_BOOST(envoy::config::filter::network::tcp_proxy::v2::TcpProxy)>());
+        config_blob
+            ->Is<API_NO_BOOST(envoy::extensions::filters::network::tcp_proxy::v3::TcpProxy)>());
     auto tcp_proxy_config =
         MessageUtil::anyConvert<envoy::extensions::filters::network::tcp_proxy::v3::TcpProxy>(
             *config_blob);
@@ -462,14 +486,15 @@ TEST_P(TcpProxyIntegrationTest, TestMaxDownstreamConnectionDurationWithNoData) {
 
 TEST_P(TcpProxyIntegrationTest, TestMaxDownstreamConnectionDurationWithLargeOutstandingData) {
   config_helper_.setBufferLimits(1024, 1024);
-  enable_half_close_ = false;
+  enableHalfClose(false);
   config_helper_.addConfigModifier([&](envoy::config::bootstrap::v3::Bootstrap& bootstrap) -> void {
     auto* listener = bootstrap.mutable_static_resources()->mutable_listeners(0);
     auto* filter_chain = listener->mutable_filter_chains(0);
     auto* config_blob = filter_chain->mutable_filters(0)->mutable_typed_config();
 
     ASSERT_TRUE(
-        config_blob->Is<API_NO_BOOST(envoy::config::filter::network::tcp_proxy::v2::TcpProxy)>());
+        config_blob
+            ->Is<API_NO_BOOST(envoy::extensions::filters::network::tcp_proxy::v3::TcpProxy)>());
     auto tcp_proxy_config =
         MessageUtil::anyConvert<envoy::extensions::filters::network::tcp_proxy::v3::TcpProxy>(
             *config_blob);
@@ -1062,7 +1087,7 @@ void TcpProxySslIntegrationTest::setupConnections() {
   // buffer. This allows us to track the bytes actually written to the socket.
 
   EXPECT_CALL(*mock_buffer_factory_, create_(_, _, _))
-      .Times(1)
+      .Times(AtLeast(1))
       .WillOnce(Invoke([&](std::function<void()> below_low, std::function<void()> above_high,
                            std::function<void()> above_overflow) -> Buffer::Instance* {
         client_write_buffer_ =

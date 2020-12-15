@@ -20,6 +20,7 @@ envoy_cc_library(
         "//include/envoy/http:context_interface",
         "//include/envoy/http:header_map_interface",
         "//include/envoy/http:message_interface",
+        "//include/envoy/router:context_interface",
         "//include/envoy/router:router_interface",
         "//include/envoy/router:router_ratelimit_interface",
         "//include/envoy/router:shadow_writer_interface",
@@ -168,11 +169,14 @@ envoy_cc_library(
     deps = [
         ":headers_lib",
         "//include/envoy/http:filter_interface",
+        "//include/envoy/matcher:matcher_interface",
         "//source/common/buffer:watermark_buffer_lib",
         "//source/common/common:linked_object",
         "//source/common/common:scope_tracker",
         "//source/common/grpc:common_lib",
         "//source/common/local_reply:local_reply_lib",
+        "//source/common/matcher:matcher_lib",
+        "@envoy_api//envoy/extensions/filters/common/matcher/action/v3:pkg_cc_proto",
     ],
 )
 
@@ -216,7 +220,7 @@ envoy_cc_library(
         "//include/envoy/router:rds_interface",
         "//include/envoy/router:scopes_interface",
         "//include/envoy/runtime:runtime_interface",
-        "//include/envoy/server:overload_manager_interface",
+        "//include/envoy/server/overload:overload_manager_interface",
         "//include/envoy/ssl:connection_interface",
         "//include/envoy/stats:stats_interface",
         "//include/envoy/stats:stats_macros",
@@ -405,6 +409,7 @@ envoy_cc_library(
     ],
     deps = [
         ":header_map_lib",
+        ":status_lib",
         ":utility_lib",
         "//include/envoy/common:regex_interface",
         "//include/envoy/http:header_map_interface",
