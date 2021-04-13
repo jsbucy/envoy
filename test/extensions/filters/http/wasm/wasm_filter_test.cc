@@ -2,11 +2,14 @@
 
 #include "extensions/filters/http/wasm/wasm_filter.h"
 
+#include "test/extensions/common/wasm/wasm_runtime.h"
 #include "test/mocks/network/connection.h"
 #include "test/mocks/router/mocks.h"
+#include "test/test_common/test_runtime.h"
 #include "test/test_common/wasm_base.h"
 
 using testing::Eq;
+using testing::InSequence;
 using testing::Invoke;
 using testing::Return;
 using testing::ReturnRef;
@@ -62,10 +65,8 @@ public:
     };
   }
 
-  void setup(const std::string& code, std::string root_id = "", std::string vm_configuration = "") {
-    setupBase(std::get<0>(GetParam()), code, createContextFn(), root_id, vm_configuration);
-  }
-  void setupTest(std::string root_id = "", std::string vm_configuration = "") {
+  void setupTest(std::string root_id = "", std::string vm_configuration = "",
+                 envoy::extensions::wasm::v3::EnvironmentVariables envs = {}) {
     std::string code;
     if (std::get<0>(GetParam()) == "null") {
       code = "HttpWasmTestCpp";
@@ -80,11 +81,16 @@ public:
         code = TestEnvironment::readFileToStringForTest(basic_path + "_rust.wasm");
       }
     }
-    setupBase(std::get<0>(GetParam()), code, createContextFn(), root_id, vm_configuration);
-  }
-  void setupFilter(const std::string root_id = "") { setupFilterBase<TestFilter>(root_id); }
 
-  void setupGrpcStreamTest(Grpc::RawAsyncStreamCallbacks*& callbacks);
+    setRootId(root_id);
+    setEnvs(envs);
+    setVmConfiguration(vm_configuration);
+    setupBase(std::get<0>(GetParam()), code, createContextFn());
+  }
+
+  void setupFilter() { setupFilterBase<TestFilter>(); }
+
+  void setupGrpcStreamTest(Grpc::RawAsyncStreamCallbacks*& callbacks, std::string id);
 
   TestRoot& rootContext() { return *static_cast<TestRoot*>(root_context_); }
   TestFilter& filter() { return *static_cast<TestFilter*>(context_.get()); }
@@ -94,33 +100,46 @@ protected:
   Grpc::MockAsyncClientManager async_client_manager_;
 };
 
-// NB: this is required by VC++ which can not handle the use of macros in the macro definitions
-// used by INSTANTIATE_TEST_SUITE_P.
-auto testing_values = testing::Values(
-#if defined(ENVOY_WASM_V8)
-    std::make_tuple("v8", "cpp"), std::make_tuple("v8", "rust"),
-#endif
-#if defined(ENVOY_WASM_WAVM)
-    std::make_tuple("wavm", "cpp"), std::make_tuple("wavm", "rust"),
-#endif
-    std::make_tuple("null", "cpp"));
-INSTANTIATE_TEST_SUITE_P(RuntimesAndLanguages, WasmHttpFilterTest, testing_values);
+INSTANTIATE_TEST_SUITE_P(RuntimesAndLanguages, WasmHttpFilterTest,
+                         Envoy::Extensions::Common::Wasm::runtime_and_language_values);
 
 // Bad code in initial config.
 TEST_P(WasmHttpFilterTest, BadCode) {
-  setup("bad code");
+  setupBase(std::get<0>(GetParam()), "bad code", createContextFn());
   EXPECT_EQ(wasm_, nullptr);
 }
 
 // Script touching headers only, request that is headers only.
-TEST_P(WasmHttpFilterTest, HeadersOnlyRequestHeadersOnly) {
-  setupTest("", "headers");
+TEST_P(WasmHttpFilterTest, HeadersOnlyRequestHeadersOnlyWithEnvVars) {
+  envoy::extensions::wasm::v3::EnvironmentVariables envs;
+  if (std::get<0>(GetParam()) != "null") {
+    // Setup env vars.
+    const std::string host_env_key = "ENVOY_HTTP_WASM_TEST_HEADERS_HOST_ENV";
+    const std::string host_env_value = "foo";
+    const std::string env_key = "ENVOY_HTTP_WASM_TEST_HEADERS_KEY_VALUE_ENV";
+    const std::string env_value = "bar";
+    TestEnvironment::setEnvVar(host_env_key, host_env_value, 0);
+    envs.mutable_host_env_keys()->Add(host_env_key.c_str());
+    (*envs.mutable_key_values())[env_key] = env_value;
+  }
+  setupTest("", "headers", envs);
   setupFilter();
   EXPECT_CALL(encoder_callbacks_, streamInfo()).WillRepeatedly(ReturnRef(request_stream_info_));
+  if (std::get<0>(GetParam()) != "null") {
+    EXPECT_CALL(filter(),
+                log_(spdlog::level::trace, Eq("ENVOY_HTTP_WASM_TEST_HEADERS_HOST_ENV: foo\n"
+                                              "ENVOY_HTTP_WASM_TEST_HEADERS_KEY_VALUE_ENV: bar")));
+  }
   EXPECT_CALL(filter(),
               log_(spdlog::level::debug, Eq(absl::string_view("onRequestHeaders 2 headers"))));
   EXPECT_CALL(filter(), log_(spdlog::level::info, Eq(absl::string_view("header path /"))));
   EXPECT_CALL(filter(), log_(spdlog::level::warn, Eq(absl::string_view("onDone 2"))));
+
+  // Verify that route cache is cleared when modifying HTTP request headers.
+  Http::MockStreamDecoderFilterCallbacks decoder_callbacks;
+  filter().setDecoderFilterCallbacks(decoder_callbacks);
+  EXPECT_CALL(decoder_callbacks, clearRouteCache()).Times(2);
+
   Http::TestRequestHeaderMapImpl request_headers{{":path", "/"}, {"server", "envoy"}};
   EXPECT_EQ(Http::FilterHeadersStatus::Continue, filter().decodeHeaders(request_headers, true));
   EXPECT_THAT(request_headers.get_("newheader"), Eq("newheadervalue"));
@@ -144,6 +163,12 @@ TEST_P(WasmHttpFilterTest, AllHeadersAndTrailers) {
               log_(spdlog::level::debug, Eq(absl::string_view("onRequestHeaders 2 headers"))));
   EXPECT_CALL(filter(), log_(spdlog::level::info, Eq(absl::string_view("header path /"))));
   EXPECT_CALL(filter(), log_(spdlog::level::warn, Eq(absl::string_view("onDone 2"))));
+
+  // Verify that route cache is cleared when modifying HTTP request headers.
+  Http::MockStreamDecoderFilterCallbacks decoder_callbacks;
+  filter().setDecoderFilterCallbacks(decoder_callbacks);
+  EXPECT_CALL(decoder_callbacks, clearRouteCache()).Times(2);
+
   Http::TestRequestHeaderMapImpl request_headers{{":path", "/"}, {"server", "envoy"}};
   EXPECT_EQ(Http::FilterHeadersStatus::Continue, filter().decodeHeaders(request_headers, false));
   EXPECT_THAT(request_headers.get_("newheader"), Eq("newheadervalue"));
@@ -152,8 +177,13 @@ TEST_P(WasmHttpFilterTest, AllHeadersAndTrailers) {
   EXPECT_EQ(Http::FilterTrailersStatus::Continue, filter().decodeTrailers(request_trailers));
   Http::MetadataMap request_metadata{};
   EXPECT_EQ(Http::FilterMetadataStatus::Continue, filter().decodeMetadata(request_metadata));
+
+  // Verify that route cache is NOT cleared when modifying HTTP response headers.
+  EXPECT_CALL(decoder_callbacks, clearRouteCache()).Times(0);
+
   Http::TestResponseHeaderMapImpl response_headers{};
   EXPECT_EQ(Http::FilterHeadersStatus::Continue, filter().encodeHeaders(response_headers, false));
+  EXPECT_THAT(response_headers.get_("test-status"), Eq("OK"));
   Http::TestResponseTrailerMapImpl response_trailers{};
   EXPECT_EQ(Http::FilterTrailersStatus::StopIteration, filter().encodeTrailers(response_trailers));
   Http::MetadataMap response_metadata{};
@@ -211,7 +241,7 @@ TEST_P(WasmHttpFilterTest, HeadersStopAndContinue) {
   EXPECT_CALL(filter(), log_(spdlog::level::info, Eq(absl::string_view("header path /"))));
   EXPECT_CALL(filter(), log_(spdlog::level::warn, Eq(absl::string_view("onDone 2"))));
   Http::TestRequestHeaderMapImpl request_headers{{":path", "/"}, {"server", "envoy-wasm-pause"}};
-  EXPECT_EQ(Http::FilterHeadersStatus::StopIteration,
+  EXPECT_EQ(Http::FilterHeadersStatus::StopAllIterationAndWatermark,
             filter().decodeHeaders(request_headers, true));
   root_context_->onTick(0);
   filter().clearRouteCache();
@@ -291,7 +321,7 @@ TEST_P(WasmHttpFilterTest, HeadersStopAndWatermark) {
 // Script that reads the body.
 TEST_P(WasmHttpFilterTest, BodyRequestReadBody) {
   setupTest("body");
-  setupFilter("body");
+  setupFilter();
   EXPECT_CALL(filter(), log_(spdlog::level::err, Eq(absl::string_view("onBody hello"))));
   Http::TestRequestHeaderMapImpl request_headers{{":path", "/"}, {"x-test-operation", "ReadBody"}};
   EXPECT_EQ(Http::FilterHeadersStatus::Continue, filter().decodeHeaders(request_headers, false));
@@ -303,7 +333,7 @@ TEST_P(WasmHttpFilterTest, BodyRequestReadBody) {
 // Script that prepends and appends to the body.
 TEST_P(WasmHttpFilterTest, BodyRequestPrependAndAppendToBody) {
   setupTest("body");
-  setupFilter("body");
+  setupFilter();
   EXPECT_CALL(filter(),
               log_(spdlog::level::err, Eq(absl::string_view("onBody prepend.hello.append"))));
   EXPECT_CALL(filter(), log_(spdlog::level::err,
@@ -327,7 +357,7 @@ TEST_P(WasmHttpFilterTest, BodyRequestPrependAndAppendToBody) {
 // Script that replaces the body.
 TEST_P(WasmHttpFilterTest, BodyRequestReplaceBody) {
   setupTest("body");
-  setupFilter("body");
+  setupFilter();
   EXPECT_CALL(filter(), log_(spdlog::level::err, Eq(absl::string_view("onBody replace")))).Times(2);
   Http::TestRequestHeaderMapImpl request_headers{{":path", "/"},
                                                  {"x-test-operation", "ReplaceBody"}};
@@ -348,7 +378,7 @@ TEST_P(WasmHttpFilterTest, BodyRequestReplaceBody) {
 // Script that removes the body.
 TEST_P(WasmHttpFilterTest, BodyRequestRemoveBody) {
   setupTest("body");
-  setupFilter("body");
+  setupFilter();
   EXPECT_CALL(filter(), log_(spdlog::level::err, Eq(absl::string_view("onBody "))));
   Http::TestRequestHeaderMapImpl request_headers{{":path", "/"},
                                                  {"x-test-operation", "RemoveBody"}};
@@ -361,7 +391,7 @@ TEST_P(WasmHttpFilterTest, BodyRequestRemoveBody) {
 // Script that buffers the body.
 TEST_P(WasmHttpFilterTest, BodyRequestBufferBody) {
   setupTest("body");
-  setupFilter("body");
+  setupFilter();
 
   Http::TestRequestHeaderMapImpl request_headers{{":path", "/"},
                                                  {"x-test-operation", "BufferBody"}};
@@ -374,17 +404,16 @@ TEST_P(WasmHttpFilterTest, BodyRequestBufferBody) {
 
   Buffer::OwnedImpl data1("hello");
   bufferedBody.add(data1);
-  EXPECT_CALL(filter(), log_(spdlog::level::err, Eq(absl::string_view("onBody hello")))).Times(1);
+  EXPECT_CALL(filter(), log_(spdlog::level::err, Eq(absl::string_view("onBody hello"))));
   EXPECT_EQ(Http::FilterDataStatus::StopIterationAndBuffer, filter().decodeData(data1, false));
 
   Buffer::OwnedImpl data2(" again ");
   bufferedBody.add(data2);
-  EXPECT_CALL(filter(), log_(spdlog::level::err, Eq(absl::string_view("onBody hello again "))))
-      .Times(1);
+  EXPECT_CALL(filter(), log_(spdlog::level::err, Eq(absl::string_view("onBody hello again "))));
   EXPECT_EQ(Http::FilterDataStatus::StopIterationAndBuffer, filter().decodeData(data2, false));
 
-  EXPECT_CALL(filter(), log_(spdlog::level::err, Eq(absl::string_view("onBody hello again hello"))))
-      .Times(1);
+  EXPECT_CALL(filter(),
+              log_(spdlog::level::err, Eq(absl::string_view("onBody hello again hello"))));
   Buffer::OwnedImpl data3("hello");
   bufferedBody.add(data3);
   EXPECT_EQ(Http::FilterDataStatus::Continue, filter().decodeData(data3, true));
@@ -404,7 +433,7 @@ TEST_P(WasmHttpFilterTest, BodyRequestBufferBody) {
 // Script that prepends and appends to the buffered body.
 TEST_P(WasmHttpFilterTest, BodyRequestPrependAndAppendToBufferedBody) {
   setupTest("body");
-  setupFilter("body");
+  setupFilter();
   EXPECT_CALL(filter(),
               log_(spdlog::level::err, Eq(absl::string_view("onBody prepend.hello.append"))));
   Http::TestRequestHeaderMapImpl request_headers{
@@ -418,7 +447,7 @@ TEST_P(WasmHttpFilterTest, BodyRequestPrependAndAppendToBufferedBody) {
 // Script that replaces the buffered body.
 TEST_P(WasmHttpFilterTest, BodyRequestReplaceBufferedBody) {
   setupTest("body");
-  setupFilter("body");
+  setupFilter();
   EXPECT_CALL(filter(), log_(spdlog::level::err, Eq(absl::string_view("onBody replace"))));
   Http::TestRequestHeaderMapImpl request_headers{{":path", "/"},
                                                  {"x-test-operation", "ReplaceBufferedBody"}};
@@ -431,7 +460,7 @@ TEST_P(WasmHttpFilterTest, BodyRequestReplaceBufferedBody) {
 // Script that removes the buffered body.
 TEST_P(WasmHttpFilterTest, BodyRequestRemoveBufferedBody) {
   setupTest("body");
-  setupFilter("body");
+  setupFilter();
   EXPECT_CALL(filter(), log_(spdlog::level::err, Eq(absl::string_view("onBody "))));
   Http::TestRequestHeaderMapImpl request_headers{{":path", "/"},
                                                  {"x-test-operation", "RemoveBufferedBody"}};
@@ -444,7 +473,7 @@ TEST_P(WasmHttpFilterTest, BodyRequestRemoveBufferedBody) {
 // Script that buffers the first part of the body and streams the rest
 TEST_P(WasmHttpFilterTest, BodyRequestBufferThenStreamBody) {
   setupTest("body");
-  setupFilter("body");
+  setupFilter();
 
   Http::TestRequestHeaderMapImpl request_headers{{":path", "/"}};
   EXPECT_EQ(Http::FilterHeadersStatus::Continue, filter().decodeHeaders(request_headers, false));
@@ -459,33 +488,29 @@ TEST_P(WasmHttpFilterTest, BodyRequestBufferThenStreamBody) {
   EXPECT_EQ(Http::FilterHeadersStatus::Continue, filter().encodeHeaders(response_headers, false));
 
   Buffer::OwnedImpl data1("hello");
-  EXPECT_CALL(filter(), log_(spdlog::level::err, Eq(absl::string_view("onBody hello")))).Times(1);
+  EXPECT_CALL(filter(), log_(spdlog::level::err, Eq(absl::string_view("onBody hello"))));
   EXPECT_EQ(Http::FilterDataStatus::StopIterationAndBuffer, filter().decodeData(data1, false));
   bufferedBody.add(data1);
 
   Buffer::OwnedImpl data2(", there, ");
   bufferedBody.add(data2);
-  EXPECT_CALL(filter(), log_(spdlog::level::err, Eq(absl::string_view("onBody hello, there, "))))
-      .Times(1);
+  EXPECT_CALL(filter(), log_(spdlog::level::err, Eq(absl::string_view("onBody hello, there, "))));
   EXPECT_EQ(Http::FilterDataStatus::StopIterationAndBuffer, filter().decodeData(data2, false));
 
   // Previous callbacks returned "Buffer" so we have buffered so far
   Buffer::OwnedImpl data3("world!");
   bufferedBody.add(data3);
   EXPECT_CALL(filter(),
-              log_(spdlog::level::err, Eq(absl::string_view("onBody hello, there, world!"))))
-      .Times(1);
+              log_(spdlog::level::err, Eq(absl::string_view("onBody hello, there, world!"))));
   EXPECT_EQ(Http::FilterDataStatus::Continue, filter().decodeData(data3, false));
 
   // Last callback returned "continue" so we just see individual chunks.
   Buffer::OwnedImpl data4("So it's ");
-  EXPECT_CALL(filter(), log_(spdlog::level::err, Eq(absl::string_view("onBody So it's "))))
-      .Times(1);
+  EXPECT_CALL(filter(), log_(spdlog::level::err, Eq(absl::string_view("onBody So it's "))));
   EXPECT_EQ(Http::FilterDataStatus::Continue, filter().decodeData(data4, false));
 
   Buffer::OwnedImpl data5("goodbye, then!");
-  EXPECT_CALL(filter(), log_(spdlog::level::err, Eq(absl::string_view("onBody goodbye, then!"))))
-      .Times(1);
+  EXPECT_CALL(filter(), log_(spdlog::level::err, Eq(absl::string_view("onBody goodbye, then!"))));
   EXPECT_EQ(Http::FilterDataStatus::Continue, filter().decodeData(data5, true));
 
   filter().onDestroy();
@@ -494,7 +519,7 @@ TEST_P(WasmHttpFilterTest, BodyRequestBufferThenStreamBody) {
 // Script that buffers the first part of the body and streams the rest
 TEST_P(WasmHttpFilterTest, BodyResponseBufferThenStreamBody) {
   setupTest("body");
-  setupFilter("body");
+  setupFilter();
 
   Http::TestRequestHeaderMapImpl request_headers{{":path", "/"}};
   EXPECT_EQ(Http::FilterHeadersStatus::Continue, filter().decodeHeaders(request_headers, false));
@@ -508,33 +533,29 @@ TEST_P(WasmHttpFilterTest, BodyResponseBufferThenStreamBody) {
   EXPECT_EQ(Http::FilterHeadersStatus::Continue, filter().encodeHeaders(response_headers, false));
 
   Buffer::OwnedImpl data1("hello");
-  EXPECT_CALL(filter(), log_(spdlog::level::err, Eq(absl::string_view("onBody hello")))).Times(1);
+  EXPECT_CALL(filter(), log_(spdlog::level::err, Eq(absl::string_view("onBody hello"))));
   EXPECT_EQ(Http::FilterDataStatus::StopIterationAndBuffer, filter().encodeData(data1, false));
   bufferedBody.add(data1);
 
   Buffer::OwnedImpl data2(", there, ");
   bufferedBody.add(data2);
-  EXPECT_CALL(filter(), log_(spdlog::level::err, Eq(absl::string_view("onBody hello, there, "))))
-      .Times(1);
+  EXPECT_CALL(filter(), log_(spdlog::level::err, Eq(absl::string_view("onBody hello, there, "))));
   EXPECT_EQ(Http::FilterDataStatus::StopIterationAndBuffer, filter().encodeData(data2, false));
 
   // Previous callbacks returned "Buffer" so we have buffered so far
   Buffer::OwnedImpl data3("world!");
   bufferedBody.add(data3);
   EXPECT_CALL(filter(),
-              log_(spdlog::level::err, Eq(absl::string_view("onBody hello, there, world!"))))
-      .Times(1);
+              log_(spdlog::level::err, Eq(absl::string_view("onBody hello, there, world!"))));
   EXPECT_EQ(Http::FilterDataStatus::Continue, filter().encodeData(data3, false));
 
   // Last callback returned "continue" so we just see individual chunks.
   Buffer::OwnedImpl data4("So it's ");
-  EXPECT_CALL(filter(), log_(spdlog::level::err, Eq(absl::string_view("onBody So it's "))))
-      .Times(1);
+  EXPECT_CALL(filter(), log_(spdlog::level::err, Eq(absl::string_view("onBody So it's "))));
   EXPECT_EQ(Http::FilterDataStatus::Continue, filter().encodeData(data4, false));
 
   Buffer::OwnedImpl data5("goodbye, then!");
-  EXPECT_CALL(filter(), log_(spdlog::level::err, Eq(absl::string_view("onBody goodbye, then!"))))
-      .Times(1);
+  EXPECT_CALL(filter(), log_(spdlog::level::err, Eq(absl::string_view("onBody goodbye, then!"))));
   EXPECT_EQ(Http::FilterDataStatus::Continue, filter().encodeData(data5, true));
 
   filter().onDestroy();
@@ -547,11 +568,11 @@ TEST_P(WasmHttpFilterTest, AccessLog) {
   EXPECT_CALL(filter(),
               log_(spdlog::level::debug, Eq(absl::string_view("onRequestHeaders 2 headers"))));
   EXPECT_CALL(filter(), log_(spdlog::level::info, Eq(absl::string_view("header path /"))));
-  EXPECT_CALL(filter(), log_(spdlog::level::warn, Eq(absl::string_view("onLog 2 /"))));
+  EXPECT_CALL(filter(), log_(spdlog::level::warn, Eq(absl::string_view("onLog 2 / 200"))));
   EXPECT_CALL(filter(), log_(spdlog::level::warn, Eq(absl::string_view("onDone 2"))));
 
   Http::TestRequestHeaderMapImpl request_headers{{":path", "/"}};
-  Http::TestResponseHeaderMapImpl response_headers{};
+  Http::TestResponseHeaderMapImpl response_headers{{":status", "200"}};
   Http::TestResponseTrailerMapImpl response_trailers{};
   EXPECT_EQ(Http::FilterHeadersStatus::Continue, filter().decodeHeaders(request_headers, false));
   filter().continueStream(proxy_wasm::WasmStreamType::Response);
@@ -561,15 +582,31 @@ TEST_P(WasmHttpFilterTest, AccessLog) {
   filter().onDestroy();
 }
 
+TEST_P(WasmHttpFilterTest, AccessLogClientDisconnected) {
+  setupTest("", "headers");
+  setupFilter();
+  EXPECT_CALL(filter(),
+              log_(spdlog::level::debug, Eq(absl::string_view("onRequestHeaders 2 headers"))));
+  EXPECT_CALL(filter(), log_(spdlog::level::info, Eq(absl::string_view("header path /"))));
+  EXPECT_CALL(filter(), log_(spdlog::level::warn, Eq(absl::string_view("onLog 2 / "))));
+  EXPECT_CALL(filter(), log_(spdlog::level::warn, Eq(absl::string_view("onDone 2"))));
+
+  Http::TestRequestHeaderMapImpl request_headers{{":path", "/"}};
+  EXPECT_EQ(Http::FilterHeadersStatus::Continue, filter().decodeHeaders(request_headers, false));
+  StreamInfo::MockStreamInfo log_stream_info;
+  filter().log(&request_headers, nullptr, nullptr, log_stream_info);
+  filter().onDestroy();
+}
+
 TEST_P(WasmHttpFilterTest, AccessLogCreate) {
   setupTest("", "headers");
   setupFilter();
-  EXPECT_CALL(filter(), log_(spdlog::level::warn, Eq(absl::string_view("onLog 2 /"))));
+  EXPECT_CALL(filter(), log_(spdlog::level::warn, Eq(absl::string_view("onLog 2 / 200"))));
   EXPECT_CALL(filter(), log_(spdlog::level::warn, Eq(absl::string_view("onDone 2"))));
 
   StreamInfo::MockStreamInfo log_stream_info;
   Http::TestRequestHeaderMapImpl request_headers{{":path", "/"}};
-  Http::TestResponseHeaderMapImpl response_headers{};
+  Http::TestResponseHeaderMapImpl response_headers{{":status", "200"}};
   Http::TestResponseTrailerMapImpl response_trailers{};
   filter().log(&request_headers, &response_headers, &response_trailers, log_stream_info);
   filter().onDestroy();
@@ -577,15 +614,14 @@ TEST_P(WasmHttpFilterTest, AccessLogCreate) {
 
 TEST_P(WasmHttpFilterTest, AsyncCall) {
   setupTest("async_call");
-  setupFilter("async_call");
+  setupFilter();
 
   Http::TestRequestHeaderMapImpl request_headers{{":path", "/"}};
-  Http::MockAsyncClientRequest request(&cluster_manager_.async_client_);
+  Http::MockAsyncClientRequest request(&cluster_manager_.thread_local_cluster_.async_client_);
   Http::AsyncClient::Callbacks* callbacks = nullptr;
-  EXPECT_CALL(cluster_manager_, get(Eq("cluster"))).Times(testing::AtLeast(1));
-  EXPECT_CALL(cluster_manager_, get(Eq("bogus cluster"))).WillRepeatedly(Return(nullptr));
-  EXPECT_CALL(cluster_manager_, httpAsyncClientForCluster("cluster"));
-  EXPECT_CALL(cluster_manager_.async_client_, send_(_, _, _))
+  cluster_manager_.initializeThreadLocalClusters({"cluster"});
+  EXPECT_CALL(cluster_manager_.thread_local_cluster_, httpAsyncClient());
+  EXPECT_CALL(cluster_manager_.thread_local_cluster_.async_client_, send_(_, _, _))
       .WillOnce(
           Invoke([&](Http::RequestMessagePtr& message, Http::AsyncClient::Callbacks& cb,
                      const Http::AsyncClient::RequestOptions&) -> Http::AsyncClient::Request* {
@@ -612,47 +648,117 @@ TEST_P(WasmHttpFilterTest, AsyncCall) {
         callbacks->onSuccess(request, std::move(response_message));
         return proxy_wasm::WasmResult::Ok;
       }));
-  EXPECT_EQ(Http::FilterHeadersStatus::StopIteration,
+  EXPECT_EQ(Http::FilterHeadersStatus::StopAllIterationAndWatermark,
+            filter().decodeHeaders(request_headers, false));
+
+  EXPECT_NE(callbacks, nullptr);
+}
+
+TEST_P(WasmHttpFilterTest, StopAndResumeViaAsyncCall) {
+  setupTest("resume_call");
+  setupFilter();
+
+  InSequence s;
+
+  Http::TestRequestHeaderMapImpl request_headers{{":path", "/"}};
+  Http::MockAsyncClientRequest request(&cluster_manager_.thread_local_cluster_.async_client_);
+  Http::AsyncClient::Callbacks* callbacks = nullptr;
+  cluster_manager_.initializeThreadLocalClusters({"cluster"});
+  EXPECT_CALL(cluster_manager_.thread_local_cluster_, httpAsyncClient());
+  EXPECT_CALL(cluster_manager_.thread_local_cluster_.async_client_, send_(_, _, _))
+      .WillOnce(
+          Invoke([&](Http::RequestMessagePtr& message, Http::AsyncClient::Callbacks& cb,
+                     const Http::AsyncClient::RequestOptions&) -> Http::AsyncClient::Request* {
+            EXPECT_EQ((Http::TestRequestHeaderMapImpl{{":method", "POST"},
+                                                      {":path", "/"},
+                                                      {":authority", "foo"},
+                                                      {"content-length", "6"}}),
+                      message->headers());
+            callbacks = &cb;
+            return &request;
+          }));
+
+  EXPECT_CALL(filter(), log_(spdlog::level::info, Eq("onRequestHeaders")))
+      .WillOnce(Invoke([&](uint32_t, absl::string_view) -> proxy_wasm::WasmResult {
+        Http::ResponseMessagePtr response_message(new Http::ResponseMessageImpl(
+            Http::ResponseHeaderMapPtr{new Http::TestResponseHeaderMapImpl{{":status", "200"}}}));
+        NiceMock<Tracing::MockSpan> span;
+        Http::TestResponseHeaderMapImpl response_header{{":status", "200"}};
+        callbacks->onBeforeFinalizeUpstreamSpan(span, &response_header);
+        callbacks->onSuccess(request, std::move(response_message));
+        return proxy_wasm::WasmResult::Ok;
+      }));
+  EXPECT_CALL(filter(), log_(spdlog::level::info, Eq("continueRequest")));
+
+  Http::MockStreamDecoderFilterCallbacks decoder_callbacks;
+  filter().setDecoderFilterCallbacks(decoder_callbacks);
+  EXPECT_CALL(decoder_callbacks, continueDecoding()).WillOnce(Invoke([&]() {
+    // Verify that we're not resuming processing from within Wasm callback.
+    EXPECT_EQ(proxy_wasm::current_context_, nullptr);
+  }));
+
+  EXPECT_EQ(Http::FilterHeadersStatus::StopAllIterationAndWatermark,
             filter().decodeHeaders(request_headers, false));
 
   EXPECT_NE(callbacks, nullptr);
 }
 
 TEST_P(WasmHttpFilterTest, AsyncCallBadCall) {
-  if (std::get<1>(GetParam()) == "rust") {
-    // TODO(PiotrSikora): The Rust SDK does not support end_of_stream in on_http_request_headers.
-    return;
-  }
   setupTest("async_call");
-  setupFilter("async_call");
+  setupFilter();
 
-  Http::TestRequestHeaderMapImpl request_headers{{":path", "/"}};
-  Http::MockAsyncClientRequest request(&cluster_manager_.async_client_);
-  EXPECT_CALL(cluster_manager_, get(Eq("cluster"))).Times(testing::AtLeast(1));
-  EXPECT_CALL(cluster_manager_, get(Eq("bogus cluster"))).WillRepeatedly(Return(nullptr));
-  EXPECT_CALL(cluster_manager_, httpAsyncClientForCluster("cluster"));
+  Http::TestRequestHeaderMapImpl request_headers{{":path", "/bad"}};
+  Http::MockAsyncClientRequest request(&cluster_manager_.thread_local_cluster_.async_client_);
+  cluster_manager_.initializeThreadLocalClusters({"cluster"});
+  EXPECT_CALL(cluster_manager_.thread_local_cluster_, httpAsyncClient());
   // Just fail the send.
-  EXPECT_CALL(cluster_manager_.async_client_, send_(_, _, _))
+  EXPECT_CALL(cluster_manager_.thread_local_cluster_.async_client_, send_(_, _, _))
       .WillOnce(
           Invoke([&](Http::RequestMessagePtr&, Http::AsyncClient::Callbacks&,
                      const Http::AsyncClient::RequestOptions&) -> Http::AsyncClient::Request* {
             return nullptr;
           }));
 
-  EXPECT_EQ(Http::FilterHeadersStatus::Continue, filter().decodeHeaders(request_headers, true));
+  EXPECT_CALL(filter(), log_(spdlog::level::info, Eq("async_call rejected")));
+  EXPECT_EQ(Http::FilterHeadersStatus::StopAllIterationAndWatermark,
+            filter().decodeHeaders(request_headers, false));
+}
+
+TEST_P(WasmHttpFilterTest, AsyncCallBadCluster) {
+  setupTest("async_call");
+  setupFilter();
+
+  Http::TestRequestHeaderMapImpl request_headers{{":path", "/bad"}};
+  Http::MockAsyncClientRequest request(&cluster_manager_.thread_local_cluster_.async_client_);
+  cluster_manager_.initializeThreadLocalClusters({"cluster"});
+  EXPECT_CALL(cluster_manager_.thread_local_cluster_, httpAsyncClient());
+  EXPECT_CALL(cluster_manager_.thread_local_cluster_.async_client_, send_(_, _, _))
+      .WillOnce(
+          Invoke([&](Http::RequestMessagePtr&, Http::AsyncClient::Callbacks& cb,
+                     const Http::AsyncClient::RequestOptions&) -> Http::AsyncClient::Request* {
+            Http::ResponseMessagePtr response(
+                new Http::ResponseMessageImpl(Http::ResponseHeaderMapPtr{
+                    new Http::TestResponseHeaderMapImpl{{":status", "503"}}}));
+            // Simulate code path for "no healthy host for HTTP connection pool" inline callback.
+            cb.onSuccess(request, std::move(response));
+            return nullptr;
+          }));
+
+  EXPECT_CALL(filter(), log_(spdlog::level::info, Eq("async_call rejected")));
+  EXPECT_EQ(Http::FilterHeadersStatus::StopAllIterationAndWatermark,
+            filter().decodeHeaders(request_headers, false));
 }
 
 TEST_P(WasmHttpFilterTest, AsyncCallFailure) {
   setupTest("async_call");
-  setupFilter("async_call");
+  setupFilter();
 
   Http::TestRequestHeaderMapImpl request_headers{{":path", "/"}};
-  Http::MockAsyncClientRequest request(&cluster_manager_.async_client_);
+  Http::MockAsyncClientRequest request(&cluster_manager_.thread_local_cluster_.async_client_);
   Http::AsyncClient::Callbacks* callbacks = nullptr;
-  EXPECT_CALL(cluster_manager_, get(Eq("cluster"))).Times(testing::AtLeast(1));
-  EXPECT_CALL(cluster_manager_, get(Eq("bogus cluster"))).WillRepeatedly(Return(nullptr));
-  EXPECT_CALL(cluster_manager_, httpAsyncClientForCluster("cluster"));
-  EXPECT_CALL(cluster_manager_.async_client_, send_(_, _, _))
+  cluster_manager_.initializeThreadLocalClusters({"cluster"});
+  EXPECT_CALL(cluster_manager_.thread_local_cluster_, httpAsyncClient());
+  EXPECT_CALL(cluster_manager_.thread_local_cluster_.async_client_, send_(_, _, _))
       .WillOnce(
           Invoke([&](Http::RequestMessagePtr& message, Http::AsyncClient::Callbacks& cb,
                      const Http::AsyncClient::RequestOptions&) -> Http::AsyncClient::Request* {
@@ -677,7 +783,7 @@ TEST_P(WasmHttpFilterTest, AsyncCallFailure) {
   } else {
     EXPECT_CALL(rootContext(), log_(spdlog::level::info, Eq("async_call failed")));
   }
-  EXPECT_EQ(Http::FilterHeadersStatus::StopIteration,
+  EXPECT_EQ(Http::FilterHeadersStatus::StopAllIterationAndWatermark,
             filter().decodeHeaders(request_headers, false));
 
   EXPECT_NE(callbacks, nullptr);
@@ -685,15 +791,14 @@ TEST_P(WasmHttpFilterTest, AsyncCallFailure) {
 
 TEST_P(WasmHttpFilterTest, AsyncCallAfterDestroyed) {
   setupTest("async_call");
-  setupFilter("async_call");
+  setupFilter();
 
   Http::TestRequestHeaderMapImpl request_headers{{":path", "/"}};
-  Http::MockAsyncClientRequest request(&cluster_manager_.async_client_);
+  Http::MockAsyncClientRequest request(&cluster_manager_.thread_local_cluster_.async_client_);
   Http::AsyncClient::Callbacks* callbacks = nullptr;
-  EXPECT_CALL(cluster_manager_, get(Eq("cluster"))).Times(testing::AtLeast(1));
-  EXPECT_CALL(cluster_manager_, get(Eq("bogus cluster"))).WillRepeatedly(Return(nullptr));
-  EXPECT_CALL(cluster_manager_, httpAsyncClientForCluster("cluster"));
-  EXPECT_CALL(cluster_manager_.async_client_, send_(_, _, _))
+  cluster_manager_.initializeThreadLocalClusters({"cluster"});
+  EXPECT_CALL(cluster_manager_.thread_local_cluster_, httpAsyncClient());
+  EXPECT_CALL(cluster_manager_.thread_local_cluster_.async_client_, send_(_, _, _))
       .WillOnce(
           Invoke([&](Http::RequestMessagePtr& message, Http::AsyncClient::Callbacks& cb,
                      const Http::AsyncClient::RequestOptions&) -> Http::AsyncClient::Request* {
@@ -708,7 +813,7 @@ TEST_P(WasmHttpFilterTest, AsyncCallAfterDestroyed) {
           }));
 
   EXPECT_CALL(filter(), log_(spdlog::level::info, Eq("onRequestHeaders")));
-  EXPECT_EQ(Http::FilterHeadersStatus::StopIteration,
+  EXPECT_EQ(Http::FilterHeadersStatus::StopAllIterationAndWatermark,
             filter().decodeHeaders(request_headers, false));
 
   EXPECT_CALL(request, cancel()).WillOnce([&]() { callbacks = nullptr; });
@@ -716,6 +821,7 @@ TEST_P(WasmHttpFilterTest, AsyncCallAfterDestroyed) {
   // Destroy the Context, Plugin and VM.
   context_.reset();
   plugin_.reset();
+  plugin_handle_.reset();
   wasm_.reset();
 
   Http::ResponseMessagePtr response_message(new Http::ResponseMessageImpl(
@@ -734,53 +840,75 @@ TEST_P(WasmHttpFilterTest, GrpcCall) {
     // TODO(PiotrSikora): gRPC call outs not yet supported in the Rust SDK.
     return;
   }
-  setupTest("grpc_call");
-  setupFilter("grpc_call");
-  NiceMock<Grpc::MockAsyncRequest> request;
-  Grpc::RawAsyncRequestCallbacks* callbacks = nullptr;
-  Grpc::MockAsyncClientManager client_manager;
-  auto client_factory = std::make_unique<Grpc::MockAsyncClientFactory>();
-  auto async_client = std::make_unique<Grpc::MockAsyncClient>();
-  Tracing::Span* parent_span{};
-  EXPECT_CALL(*async_client, sendRaw(_, _, _, _, _, _))
-      .WillOnce(Invoke([&](absl::string_view service_full_name, absl::string_view method_name,
-                           Buffer::InstancePtr&& message, Grpc::RawAsyncRequestCallbacks& cb,
-                           Tracing::Span& span, const Http::AsyncClient::RequestOptions& options)
-                           -> Grpc::AsyncRequest* {
-        EXPECT_EQ(service_full_name, "service");
-        EXPECT_EQ(method_name, "method");
-        ProtobufWkt::Value value;
-        EXPECT_TRUE(value.ParseFromArray(message->linearize(message->length()), message->length()));
-        EXPECT_EQ(value.string_value(), "request");
-        callbacks = &cb;
-        parent_span = &span;
-        EXPECT_EQ(options.timeout->count(), 1000);
-        return &request;
-      }));
-  EXPECT_CALL(*client_factory, create).WillOnce(Invoke([&]() -> Grpc::RawAsyncClientPtr {
-    return std::move(async_client);
-  }));
-  EXPECT_CALL(cluster_manager_, grpcAsyncClientManager())
-      .WillOnce(Invoke([&]() -> Grpc::AsyncClientManager& { return client_manager; }));
-  EXPECT_CALL(client_manager, factoryForGrpcService(_, _, _))
-      .WillOnce(Invoke([&](const GrpcService&, Stats::Scope&, bool) -> Grpc::AsyncClientFactoryPtr {
-        return std::move(client_factory);
-      }));
-  EXPECT_CALL(rootContext(), log_(spdlog::level::debug, Eq("response")));
-  Http::TestRequestHeaderMapImpl request_headers{{":path", "/"}};
-  EXPECT_EQ(Http::FilterHeadersStatus::StopIteration,
-            filter().decodeHeaders(request_headers, false));
 
-  ProtobufWkt::Value value;
-  value.set_string_value("response");
-  std::string response_string;
-  EXPECT_TRUE(value.SerializeToString(&response_string));
-  auto response = std::make_unique<Buffer::OwnedImpl>(response_string);
-  EXPECT_NE(callbacks, nullptr);
-  NiceMock<Tracing::MockSpan> span;
-  if (callbacks) {
-    callbacks->onCreateInitialMetadata(request_headers);
-    callbacks->onSuccessRaw(std::move(response), span);
+  std::array<std::string, 2> proto_or_cluster{"grpc_call_proto", "grpc_call"};
+  for (const auto& id : proto_or_cluster) {
+    TestScopedRuntime scoped_runtime;
+    setupTest(id);
+    setupFilter();
+
+    if (id == "grpc_call_proto") {
+      Runtime::LoaderSingleton::getExisting()->mergeValues(
+          {{"envoy.reloadable_features.wasm_cluster_name_envoy_grpc", "false"}});
+      EXPECT_CALL(filter(), log_(spdlog::level::err,
+                                 Eq(absl::string_view("bogus grpc_service accepted error"))));
+    } else {
+      cluster_manager_.initializeThreadLocalClusters({"cluster"});
+      EXPECT_CALL(filter(),
+                  log_(spdlog::level::err, Eq(absl::string_view("bogus grpc_service rejected"))));
+      EXPECT_CALL(filter(),
+                  log_(spdlog::level::err, Eq(absl::string_view("cluster call succeeded"))));
+    }
+
+    NiceMock<Grpc::MockAsyncRequest> request;
+    Grpc::RawAsyncRequestCallbacks* callbacks = nullptr;
+    Grpc::MockAsyncClientManager client_manager;
+    auto client_factory = std::make_unique<Grpc::MockAsyncClientFactory>();
+    auto async_client = std::make_unique<Grpc::MockAsyncClient>();
+    Tracing::Span* parent_span{};
+    EXPECT_CALL(*async_client, sendRaw(_, _, _, _, _, _))
+        .WillOnce(
+            Invoke([&](absl::string_view service_full_name, absl::string_view method_name,
+                       Buffer::InstancePtr&& message, Grpc::RawAsyncRequestCallbacks& cb,
+                       Tracing::Span& span,
+                       const Http::AsyncClient::RequestOptions& options) -> Grpc::AsyncRequest* {
+              EXPECT_EQ(service_full_name, "service");
+              EXPECT_EQ(method_name, "method");
+              ProtobufWkt::Value value;
+              EXPECT_TRUE(
+                  value.ParseFromArray(message->linearize(message->length()), message->length()));
+              EXPECT_EQ(value.string_value(), "request");
+              callbacks = &cb;
+              parent_span = &span;
+              EXPECT_EQ(options.timeout->count(), 1000);
+              return &request;
+            }));
+    EXPECT_CALL(*client_factory, create).WillOnce(Invoke([&]() -> Grpc::RawAsyncClientPtr {
+      return std::move(async_client);
+    }));
+    EXPECT_CALL(cluster_manager_, grpcAsyncClientManager())
+        .WillOnce(Invoke([&]() -> Grpc::AsyncClientManager& { return client_manager; }));
+    EXPECT_CALL(client_manager, factoryForGrpcService(_, _, _))
+        .WillOnce(
+            Invoke([&](const GrpcService&, Stats::Scope&, bool) -> Grpc::AsyncClientFactoryPtr {
+              return std::move(client_factory);
+            }));
+    EXPECT_CALL(rootContext(), log_(spdlog::level::debug, Eq("response")));
+    Http::TestRequestHeaderMapImpl request_headers{{":path", "/"}};
+    EXPECT_EQ(Http::FilterHeadersStatus::StopAllIterationAndWatermark,
+              filter().decodeHeaders(request_headers, false));
+
+    ProtobufWkt::Value value;
+    value.set_string_value("response");
+    std::string response_string;
+    EXPECT_TRUE(value.SerializeToString(&response_string));
+    auto response = std::make_unique<Buffer::OwnedImpl>(response_string);
+    EXPECT_NE(callbacks, nullptr);
+    NiceMock<Tracing::MockSpan> span;
+    if (callbacks) {
+      callbacks->onCreateInitialMetadata(request_headers);
+      callbacks->onSuccessRaw(std::move(response), span);
+    }
   }
 }
 
@@ -789,28 +917,48 @@ TEST_P(WasmHttpFilterTest, GrpcCallBadCall) {
     // TODO(PiotrSikora): gRPC call outs not yet supported in the Rust SDK.
     return;
   }
-  setupTest("grpc_call");
-  setupFilter("grpc_call");
-  Grpc::MockAsyncClientManager client_manager;
-  auto client_factory = std::make_unique<Grpc::MockAsyncClientFactory>();
-  auto async_client = std::make_unique<Grpc::MockAsyncClient>();
-  EXPECT_CALL(*async_client, sendRaw(_, _, _, _, _, _))
-      .WillOnce(Invoke([&](absl::string_view, absl::string_view, Buffer::InstancePtr&&,
-                           Grpc::RawAsyncRequestCallbacks&, Tracing::Span&,
-                           const Http::AsyncClient::RequestOptions&) -> Grpc::AsyncRequest* {
-        return nullptr;
-      }));
-  EXPECT_CALL(*client_factory, create).WillOnce(Invoke([&]() -> Grpc::RawAsyncClientPtr {
-    return std::move(async_client);
-  }));
-  EXPECT_CALL(cluster_manager_, grpcAsyncClientManager())
-      .WillOnce(Invoke([&]() -> Grpc::AsyncClientManager& { return client_manager; }));
-  EXPECT_CALL(client_manager, factoryForGrpcService(_, _, _))
-      .WillOnce(Invoke([&](const GrpcService&, Stats::Scope&, bool) -> Grpc::AsyncClientFactoryPtr {
-        return std::move(client_factory);
-      }));
-  Http::TestRequestHeaderMapImpl request_headers{{":path", "/"}};
-  EXPECT_EQ(Http::FilterHeadersStatus::Continue, filter().decodeHeaders(request_headers, true));
+
+  std::array<std::string, 2> proto_or_cluster{"grpc_call_proto", "grpc_call"};
+  for (const auto& id : proto_or_cluster) {
+    TestScopedRuntime scoped_runtime;
+    setupTest(id);
+    setupFilter();
+
+    if (id == "grpc_call_proto") {
+      Runtime::LoaderSingleton::getExisting()->mergeValues(
+          {{"envoy.reloadable_features.wasm_cluster_name_envoy_grpc", "false"}});
+      EXPECT_CALL(filter(), log_(spdlog::level::err,
+                                 Eq(absl::string_view("bogus grpc_service accepted error"))));
+    } else {
+      cluster_manager_.initializeThreadLocalClusters({"cluster"});
+      EXPECT_CALL(filter(),
+                  log_(spdlog::level::err, Eq(absl::string_view("bogus grpc_service rejected"))));
+      EXPECT_CALL(filter(),
+                  log_(spdlog::level::err, Eq(absl::string_view("expected failure occurred"))));
+    }
+
+    Grpc::MockAsyncClientManager client_manager;
+    auto client_factory = std::make_unique<Grpc::MockAsyncClientFactory>();
+    auto async_client = std::make_unique<Grpc::MockAsyncClient>();
+    EXPECT_CALL(*async_client, sendRaw(_, _, _, _, _, _))
+        .WillOnce(Invoke([&](absl::string_view, absl::string_view, Buffer::InstancePtr&&,
+                             Grpc::RawAsyncRequestCallbacks&, Tracing::Span&,
+                             const Http::AsyncClient::RequestOptions&) -> Grpc::AsyncRequest* {
+          return nullptr;
+        }));
+    EXPECT_CALL(*client_factory, create).WillOnce(Invoke([&]() -> Grpc::RawAsyncClientPtr {
+      return std::move(async_client);
+    }));
+    EXPECT_CALL(cluster_manager_, grpcAsyncClientManager())
+        .WillOnce(Invoke([&]() -> Grpc::AsyncClientManager& { return client_manager; }));
+    EXPECT_CALL(client_manager, factoryForGrpcService(_, _, _))
+        .WillOnce(
+            Invoke([&](const GrpcService&, Stats::Scope&, bool) -> Grpc::AsyncClientFactoryPtr {
+              return std::move(client_factory);
+            }));
+    Http::TestRequestHeaderMapImpl request_headers{{":path", "/"}};
+    EXPECT_EQ(Http::FilterHeadersStatus::Continue, filter().decodeHeaders(request_headers, true));
+  }
 }
 
 TEST_P(WasmHttpFilterTest, GrpcCallFailure) {
@@ -818,60 +966,82 @@ TEST_P(WasmHttpFilterTest, GrpcCallFailure) {
     // TODO(PiotrSikora): gRPC call outs not yet supported in the Rust SDK.
     return;
   }
-  setupTest("grpc_call");
-  setupFilter("grpc_call");
-  NiceMock<Grpc::MockAsyncRequest> request;
-  Grpc::RawAsyncRequestCallbacks* callbacks = nullptr;
-  Grpc::MockAsyncClientManager client_manager;
-  auto client_factory = std::make_unique<Grpc::MockAsyncClientFactory>();
-  auto async_client = std::make_unique<Grpc::MockAsyncClient>();
-  Tracing::Span* parent_span{};
-  EXPECT_CALL(*async_client, sendRaw(_, _, _, _, _, _))
-      .WillOnce(Invoke([&](absl::string_view service_full_name, absl::string_view method_name,
-                           Buffer::InstancePtr&& message, Grpc::RawAsyncRequestCallbacks& cb,
-                           Tracing::Span& span, const Http::AsyncClient::RequestOptions& options)
-                           -> Grpc::AsyncRequest* {
-        EXPECT_EQ(service_full_name, "service");
-        EXPECT_EQ(method_name, "method");
-        ProtobufWkt::Value value;
-        EXPECT_TRUE(value.ParseFromArray(message->linearize(message->length()), message->length()));
-        EXPECT_EQ(value.string_value(), "request");
-        callbacks = &cb;
-        parent_span = &span;
-        EXPECT_EQ(options.timeout->count(), 1000);
-        return &request;
-      }));
-  EXPECT_CALL(*client_factory, create).WillOnce(Invoke([&]() -> Grpc::RawAsyncClientPtr {
-    return std::move(async_client);
-  }));
-  EXPECT_CALL(cluster_manager_, grpcAsyncClientManager())
-      .WillOnce(Invoke([&]() -> Grpc::AsyncClientManager& { return client_manager; }));
-  EXPECT_CALL(client_manager, factoryForGrpcService(_, _, _))
-      .WillOnce(Invoke([&](const GrpcService&, Stats::Scope&, bool) -> Grpc::AsyncClientFactoryPtr {
-        return std::move(client_factory);
-      }));
-  EXPECT_CALL(rootContext(), log_(spdlog::level::debug, Eq("failure bad")));
-  Http::TestRequestHeaderMapImpl request_headers{{":path", "/"}};
-  EXPECT_EQ(Http::FilterHeadersStatus::StopIteration,
-            filter().decodeHeaders(request_headers, false));
 
-  // Test some additional error paths.
-  EXPECT_EQ(filter().grpcSend(99999, "", false), proxy_wasm::WasmResult::BadArgument);
-  EXPECT_EQ(filter().grpcSend(10000, "", false), proxy_wasm::WasmResult::NotFound);
-  EXPECT_EQ(filter().grpcCancel(9999), proxy_wasm::WasmResult::NotFound);
-  EXPECT_EQ(filter().grpcCancel(10000), proxy_wasm::WasmResult::NotFound);
-  EXPECT_EQ(filter().grpcClose(9999), proxy_wasm::WasmResult::NotFound);
-  EXPECT_EQ(filter().grpcClose(10000), proxy_wasm::WasmResult::NotFound);
+  std::array<std::string, 2> proto_or_cluster{"grpc_call_proto", "grpc_call"};
+  for (const auto& id : proto_or_cluster) {
+    TestScopedRuntime scoped_runtime;
+    setupTest(id);
+    setupFilter();
 
-  ProtobufWkt::Value value;
-  value.set_string_value("response");
-  std::string response_string;
-  EXPECT_TRUE(value.SerializeToString(&response_string));
-  auto response = std::make_unique<Buffer::OwnedImpl>(response_string);
-  EXPECT_NE(callbacks, nullptr);
-  NiceMock<Tracing::MockSpan> span;
-  if (callbacks) {
-    callbacks->onFailure(Grpc::Status::WellKnownGrpcStatus::Canceled, "bad", span);
+    if (id == "grpc_call_proto") {
+      Runtime::LoaderSingleton::getExisting()->mergeValues(
+          {{"envoy.reloadable_features.wasm_cluster_name_envoy_grpc", "false"}});
+      EXPECT_CALL(filter(), log_(spdlog::level::err,
+                                 Eq(absl::string_view("bogus grpc_service accepted error"))));
+    } else {
+      cluster_manager_.initializeThreadLocalClusters({"cluster"});
+      EXPECT_CALL(filter(),
+                  log_(spdlog::level::err, Eq(absl::string_view("bogus grpc_service rejected"))));
+      EXPECT_CALL(filter(),
+                  log_(spdlog::level::err, Eq(absl::string_view("cluster call succeeded"))));
+    }
+
+    NiceMock<Grpc::MockAsyncRequest> request;
+    Grpc::RawAsyncRequestCallbacks* callbacks = nullptr;
+    Grpc::MockAsyncClientManager client_manager;
+    auto client_factory = std::make_unique<Grpc::MockAsyncClientFactory>();
+    auto async_client = std::make_unique<Grpc::MockAsyncClient>();
+    Tracing::Span* parent_span{};
+    EXPECT_CALL(*async_client, sendRaw(_, _, _, _, _, _))
+        .WillOnce(
+            Invoke([&](absl::string_view service_full_name, absl::string_view method_name,
+                       Buffer::InstancePtr&& message, Grpc::RawAsyncRequestCallbacks& cb,
+                       Tracing::Span& span,
+                       const Http::AsyncClient::RequestOptions& options) -> Grpc::AsyncRequest* {
+              EXPECT_EQ(service_full_name, "service");
+              EXPECT_EQ(method_name, "method");
+              ProtobufWkt::Value value;
+              EXPECT_TRUE(
+                  value.ParseFromArray(message->linearize(message->length()), message->length()));
+              EXPECT_EQ(value.string_value(), "request");
+              callbacks = &cb;
+              parent_span = &span;
+              EXPECT_EQ(options.timeout->count(), 1000);
+              return &request;
+            }));
+    EXPECT_CALL(*client_factory, create).WillOnce(Invoke([&]() -> Grpc::RawAsyncClientPtr {
+      return std::move(async_client);
+    }));
+    EXPECT_CALL(cluster_manager_, grpcAsyncClientManager())
+        .WillOnce(Invoke([&]() -> Grpc::AsyncClientManager& { return client_manager; }));
+    EXPECT_CALL(client_manager, factoryForGrpcService(_, _, _))
+        .WillOnce(
+            Invoke([&](const GrpcService&, Stats::Scope&, bool) -> Grpc::AsyncClientFactoryPtr {
+              return std::move(client_factory);
+            }));
+    EXPECT_CALL(rootContext(), log_(spdlog::level::debug, Eq("failure bad")));
+    Http::TestRequestHeaderMapImpl request_headers{{":path", "/"}};
+    EXPECT_EQ(Http::FilterHeadersStatus::StopAllIterationAndWatermark,
+              filter().decodeHeaders(request_headers, false));
+
+    // Test some additional error paths.
+    EXPECT_EQ(filter().grpcSend(99999, "", false), proxy_wasm::WasmResult::BadArgument);
+    EXPECT_EQ(filter().grpcSend(10000, "", false), proxy_wasm::WasmResult::NotFound);
+    EXPECT_EQ(filter().grpcCancel(9999), proxy_wasm::WasmResult::NotFound);
+    EXPECT_EQ(filter().grpcCancel(10000), proxy_wasm::WasmResult::NotFound);
+    EXPECT_EQ(filter().grpcClose(9999), proxy_wasm::WasmResult::NotFound);
+    EXPECT_EQ(filter().grpcClose(10000), proxy_wasm::WasmResult::NotFound);
+
+    ProtobufWkt::Value value;
+    value.set_string_value("response");
+    std::string response_string;
+    EXPECT_TRUE(value.SerializeToString(&response_string));
+    auto response = std::make_unique<Buffer::OwnedImpl>(response_string);
+    EXPECT_NE(callbacks, nullptr);
+    NiceMock<Tracing::MockSpan> span;
+    if (callbacks) {
+      callbacks->onFailure(Grpc::Status::WellKnownGrpcStatus::Canceled, "bad", span);
+    }
   }
 }
 
@@ -880,43 +1050,65 @@ TEST_P(WasmHttpFilterTest, GrpcCallCancel) {
     // TODO(PiotrSikora): gRPC call outs not yet supported in the Rust SDK.
     return;
   }
-  setupTest("grpc_call");
-  setupFilter("grpc_call");
-  NiceMock<Grpc::MockAsyncRequest> request;
-  Grpc::RawAsyncRequestCallbacks* callbacks = nullptr;
-  Grpc::MockAsyncClientManager client_manager;
-  auto client_factory = std::make_unique<Grpc::MockAsyncClientFactory>();
-  auto async_client = std::make_unique<Grpc::MockAsyncClient>();
-  Tracing::Span* parent_span{};
-  EXPECT_CALL(*async_client, sendRaw(_, _, _, _, _, _))
-      .WillOnce(Invoke([&](absl::string_view service_full_name, absl::string_view method_name,
-                           Buffer::InstancePtr&& message, Grpc::RawAsyncRequestCallbacks& cb,
-                           Tracing::Span& span, const Http::AsyncClient::RequestOptions& options)
-                           -> Grpc::AsyncRequest* {
-        EXPECT_EQ(service_full_name, "service");
-        EXPECT_EQ(method_name, "method");
-        ProtobufWkt::Value value;
-        EXPECT_TRUE(value.ParseFromArray(message->linearize(message->length()), message->length()));
-        EXPECT_EQ(value.string_value(), "request");
-        callbacks = &cb;
-        parent_span = &span;
-        EXPECT_EQ(options.timeout->count(), 1000);
-        return &request;
-      }));
-  EXPECT_CALL(*client_factory, create).WillOnce(Invoke([&]() -> Grpc::RawAsyncClientPtr {
-    return std::move(async_client);
-  }));
-  EXPECT_CALL(cluster_manager_, grpcAsyncClientManager())
-      .WillOnce(Invoke([&]() -> Grpc::AsyncClientManager& { return client_manager; }));
-  EXPECT_CALL(client_manager, factoryForGrpcService(_, _, _))
-      .WillOnce(Invoke([&](const GrpcService&, Stats::Scope&, bool) -> Grpc::AsyncClientFactoryPtr {
-        return std::move(client_factory);
-      }));
-  Http::TestRequestHeaderMapImpl request_headers{{":path", "/"}};
-  EXPECT_EQ(Http::FilterHeadersStatus::StopIteration,
-            filter().decodeHeaders(request_headers, false));
 
-  rootContext().onQueueReady(0);
+  std::array<std::string, 2> proto_or_cluster{"grpc_call_proto", "grpc_call"};
+  for (const auto& id : proto_or_cluster) {
+    TestScopedRuntime scoped_runtime;
+    setupTest(id);
+    setupFilter();
+
+    if (id == "grpc_call_proto") {
+      Runtime::LoaderSingleton::getExisting()->mergeValues(
+          {{"envoy.reloadable_features.wasm_cluster_name_envoy_grpc", "false"}});
+      EXPECT_CALL(filter(), log_(spdlog::level::err,
+                                 Eq(absl::string_view("bogus grpc_service accepted error"))));
+    } else {
+      cluster_manager_.initializeThreadLocalClusters({"cluster"});
+      EXPECT_CALL(filter(),
+                  log_(spdlog::level::err, Eq(absl::string_view("bogus grpc_service rejected"))));
+      EXPECT_CALL(filter(),
+                  log_(spdlog::level::err, Eq(absl::string_view("cluster call succeeded"))));
+    }
+
+    NiceMock<Grpc::MockAsyncRequest> request;
+    Grpc::RawAsyncRequestCallbacks* callbacks = nullptr;
+    Grpc::MockAsyncClientManager client_manager;
+    auto client_factory = std::make_unique<Grpc::MockAsyncClientFactory>();
+    auto async_client = std::make_unique<Grpc::MockAsyncClient>();
+    Tracing::Span* parent_span{};
+    EXPECT_CALL(*async_client, sendRaw(_, _, _, _, _, _))
+        .WillOnce(
+            Invoke([&](absl::string_view service_full_name, absl::string_view method_name,
+                       Buffer::InstancePtr&& message, Grpc::RawAsyncRequestCallbacks& cb,
+                       Tracing::Span& span,
+                       const Http::AsyncClient::RequestOptions& options) -> Grpc::AsyncRequest* {
+              EXPECT_EQ(service_full_name, "service");
+              EXPECT_EQ(method_name, "method");
+              ProtobufWkt::Value value;
+              EXPECT_TRUE(
+                  value.ParseFromArray(message->linearize(message->length()), message->length()));
+              EXPECT_EQ(value.string_value(), "request");
+              callbacks = &cb;
+              parent_span = &span;
+              EXPECT_EQ(options.timeout->count(), 1000);
+              return &request;
+            }));
+    EXPECT_CALL(*client_factory, create).WillOnce(Invoke([&]() -> Grpc::RawAsyncClientPtr {
+      return std::move(async_client);
+    }));
+    EXPECT_CALL(cluster_manager_, grpcAsyncClientManager())
+        .WillOnce(Invoke([&]() -> Grpc::AsyncClientManager& { return client_manager; }));
+    EXPECT_CALL(client_manager, factoryForGrpcService(_, _, _))
+        .WillOnce(
+            Invoke([&](const GrpcService&, Stats::Scope&, bool) -> Grpc::AsyncClientFactoryPtr {
+              return std::move(client_factory);
+            }));
+    Http::TestRequestHeaderMapImpl request_headers{{":path", "/"}};
+    EXPECT_EQ(Http::FilterHeadersStatus::StopAllIterationAndWatermark,
+              filter().decodeHeaders(request_headers, false));
+
+    rootContext().onQueueReady(0);
+  }
 }
 
 TEST_P(WasmHttpFilterTest, GrpcCallClose) {
@@ -924,43 +1116,65 @@ TEST_P(WasmHttpFilterTest, GrpcCallClose) {
     // TODO(PiotrSikora): gRPC call outs not yet supported in the Rust SDK.
     return;
   }
-  setupTest("grpc_call");
-  setupFilter("grpc_call");
-  NiceMock<Grpc::MockAsyncRequest> request;
-  Grpc::RawAsyncRequestCallbacks* callbacks = nullptr;
-  Grpc::MockAsyncClientManager client_manager;
-  auto client_factory = std::make_unique<Grpc::MockAsyncClientFactory>();
-  auto async_client = std::make_unique<Grpc::MockAsyncClient>();
-  Tracing::Span* parent_span{};
-  EXPECT_CALL(*async_client, sendRaw(_, _, _, _, _, _))
-      .WillOnce(Invoke([&](absl::string_view service_full_name, absl::string_view method_name,
-                           Buffer::InstancePtr&& message, Grpc::RawAsyncRequestCallbacks& cb,
-                           Tracing::Span& span, const Http::AsyncClient::RequestOptions& options)
-                           -> Grpc::AsyncRequest* {
-        EXPECT_EQ(service_full_name, "service");
-        EXPECT_EQ(method_name, "method");
-        ProtobufWkt::Value value;
-        EXPECT_TRUE(value.ParseFromArray(message->linearize(message->length()), message->length()));
-        EXPECT_EQ(value.string_value(), "request");
-        callbacks = &cb;
-        parent_span = &span;
-        EXPECT_EQ(options.timeout->count(), 1000);
-        return &request;
-      }));
-  EXPECT_CALL(*client_factory, create).WillOnce(Invoke([&]() -> Grpc::RawAsyncClientPtr {
-    return std::move(async_client);
-  }));
-  EXPECT_CALL(cluster_manager_, grpcAsyncClientManager())
-      .WillOnce(Invoke([&]() -> Grpc::AsyncClientManager& { return client_manager; }));
-  EXPECT_CALL(client_manager, factoryForGrpcService(_, _, _))
-      .WillOnce(Invoke([&](const GrpcService&, Stats::Scope&, bool) -> Grpc::AsyncClientFactoryPtr {
-        return std::move(client_factory);
-      }));
-  Http::TestRequestHeaderMapImpl request_headers{{":path", "/"}};
-  EXPECT_EQ(Http::FilterHeadersStatus::StopIteration,
-            filter().decodeHeaders(request_headers, false));
 
-  rootContext().onQueueReady(1);
+  std::array<std::string, 2> proto_or_cluster{"grpc_call_proto", "grpc_call"};
+  for (const auto& id : proto_or_cluster) {
+    TestScopedRuntime scoped_runtime;
+    setupTest(id);
+    setupFilter();
+
+    if (id == "grpc_call_proto") {
+      Runtime::LoaderSingleton::getExisting()->mergeValues(
+          {{"envoy.reloadable_features.wasm_cluster_name_envoy_grpc", "false"}});
+      EXPECT_CALL(filter(), log_(spdlog::level::err,
+                                 Eq(absl::string_view("bogus grpc_service accepted error"))));
+    } else {
+      cluster_manager_.initializeThreadLocalClusters({"cluster"});
+      EXPECT_CALL(filter(),
+                  log_(spdlog::level::err, Eq(absl::string_view("bogus grpc_service rejected"))));
+      EXPECT_CALL(filter(),
+                  log_(spdlog::level::err, Eq(absl::string_view("cluster call succeeded"))));
+    }
+
+    NiceMock<Grpc::MockAsyncRequest> request;
+    Grpc::RawAsyncRequestCallbacks* callbacks = nullptr;
+    Grpc::MockAsyncClientManager client_manager;
+    auto client_factory = std::make_unique<Grpc::MockAsyncClientFactory>();
+    auto async_client = std::make_unique<Grpc::MockAsyncClient>();
+    Tracing::Span* parent_span{};
+    EXPECT_CALL(*async_client, sendRaw(_, _, _, _, _, _))
+        .WillOnce(
+            Invoke([&](absl::string_view service_full_name, absl::string_view method_name,
+                       Buffer::InstancePtr&& message, Grpc::RawAsyncRequestCallbacks& cb,
+                       Tracing::Span& span,
+                       const Http::AsyncClient::RequestOptions& options) -> Grpc::AsyncRequest* {
+              EXPECT_EQ(service_full_name, "service");
+              EXPECT_EQ(method_name, "method");
+              ProtobufWkt::Value value;
+              EXPECT_TRUE(
+                  value.ParseFromArray(message->linearize(message->length()), message->length()));
+              EXPECT_EQ(value.string_value(), "request");
+              callbacks = &cb;
+              parent_span = &span;
+              EXPECT_EQ(options.timeout->count(), 1000);
+              return &request;
+            }));
+    EXPECT_CALL(*client_factory, create).WillOnce(Invoke([&]() -> Grpc::RawAsyncClientPtr {
+      return std::move(async_client);
+    }));
+    EXPECT_CALL(cluster_manager_, grpcAsyncClientManager())
+        .WillOnce(Invoke([&]() -> Grpc::AsyncClientManager& { return client_manager; }));
+    EXPECT_CALL(client_manager, factoryForGrpcService(_, _, _))
+        .WillOnce(
+            Invoke([&](const GrpcService&, Stats::Scope&, bool) -> Grpc::AsyncClientFactoryPtr {
+              return std::move(client_factory);
+            }));
+    Http::TestRequestHeaderMapImpl request_headers{{":path", "/"}};
+    EXPECT_EQ(Http::FilterHeadersStatus::StopAllIterationAndWatermark,
+              filter().decodeHeaders(request_headers, false));
+
+    rootContext().onQueueReady(1);
+  }
 }
 
 TEST_P(WasmHttpFilterTest, GrpcCallAfterDestroyed) {
@@ -968,65 +1182,88 @@ TEST_P(WasmHttpFilterTest, GrpcCallAfterDestroyed) {
     // TODO(PiotrSikora): gRPC call outs not yet supported in the Rust SDK.
     return;
   }
-  setupTest("grpc_call");
-  setupFilter("grpc_call");
-  Grpc::MockAsyncRequest request;
-  Grpc::RawAsyncRequestCallbacks* callbacks = nullptr;
-  Grpc::MockAsyncClientManager client_manager;
-  auto client_factory = std::make_unique<Grpc::MockAsyncClientFactory>();
-  auto async_client = std::make_unique<Grpc::MockAsyncClient>();
-  Tracing::Span* parent_span{};
-  EXPECT_CALL(*async_client, sendRaw(_, _, _, _, _, _))
-      .WillOnce(Invoke([&](absl::string_view service_full_name, absl::string_view method_name,
-                           Buffer::InstancePtr&& message, Grpc::RawAsyncRequestCallbacks& cb,
-                           Tracing::Span& span, const Http::AsyncClient::RequestOptions& options)
-                           -> Grpc::AsyncRequest* {
-        EXPECT_EQ(service_full_name, "service");
-        EXPECT_EQ(method_name, "method");
-        ProtobufWkt::Value value;
-        EXPECT_TRUE(value.ParseFromArray(message->linearize(message->length()), message->length()));
-        EXPECT_EQ(value.string_value(), "request");
-        callbacks = &cb;
-        parent_span = &span;
-        EXPECT_EQ(options.timeout->count(), 1000);
-        return &request;
-      }));
-  EXPECT_CALL(*client_factory, create).WillOnce(Invoke([&]() -> Grpc::RawAsyncClientPtr {
-    return std::move(async_client);
-  }));
-  EXPECT_CALL(cluster_manager_, grpcAsyncClientManager())
-      .WillOnce(Invoke([&]() -> Grpc::AsyncClientManager& { return client_manager; }));
-  EXPECT_CALL(client_manager, factoryForGrpcService(_, _, _))
-      .WillOnce(Invoke([&](const GrpcService&, Stats::Scope&, bool) -> Grpc::AsyncClientFactoryPtr {
-        return std::move(client_factory);
-      }));
-  Http::TestRequestHeaderMapImpl request_headers{{":path", "/"}};
+  std::array<std::string, 2> proto_or_cluster{"grpc_call_proto", "grpc_call"};
+  for (const auto& id : proto_or_cluster) {
+    TestScopedRuntime scoped_runtime;
+    setupTest(id);
+    setupFilter();
 
-  EXPECT_EQ(Http::FilterHeadersStatus::StopIteration,
-            filter().decodeHeaders(request_headers, false));
+    if (id == "grpc_call_proto") {
+      Runtime::LoaderSingleton::getExisting()->mergeValues(
+          {{"envoy.reloadable_features.wasm_cluster_name_envoy_grpc", "false"}});
+      EXPECT_CALL(filter(), log_(spdlog::level::err,
+                                 Eq(absl::string_view("bogus grpc_service accepted error"))));
+    } else {
+      cluster_manager_.initializeThreadLocalClusters({"cluster"});
+      EXPECT_CALL(filter(),
+                  log_(spdlog::level::err, Eq(absl::string_view("bogus grpc_service rejected"))));
+      EXPECT_CALL(filter(),
+                  log_(spdlog::level::err, Eq(absl::string_view("cluster call succeeded"))));
+    }
 
-  EXPECT_CALL(request, cancel()).WillOnce([&]() { callbacks = nullptr; });
+    Grpc::MockAsyncRequest request;
+    Grpc::RawAsyncRequestCallbacks* callbacks = nullptr;
+    Grpc::MockAsyncClientManager client_manager;
+    auto client_factory = std::make_unique<Grpc::MockAsyncClientFactory>();
+    auto async_client = std::make_unique<Grpc::MockAsyncClient>();
+    Tracing::Span* parent_span{};
+    EXPECT_CALL(*async_client, sendRaw(_, _, _, _, _, _))
+        .WillOnce(
+            Invoke([&](absl::string_view service_full_name, absl::string_view method_name,
+                       Buffer::InstancePtr&& message, Grpc::RawAsyncRequestCallbacks& cb,
+                       Tracing::Span& span,
+                       const Http::AsyncClient::RequestOptions& options) -> Grpc::AsyncRequest* {
+              EXPECT_EQ(service_full_name, "service");
+              EXPECT_EQ(method_name, "method");
+              ProtobufWkt::Value value;
+              EXPECT_TRUE(
+                  value.ParseFromArray(message->linearize(message->length()), message->length()));
+              EXPECT_EQ(value.string_value(), "request");
+              callbacks = &cb;
+              parent_span = &span;
+              EXPECT_EQ(options.timeout->count(), 1000);
+              return &request;
+            }));
+    EXPECT_CALL(*client_factory, create).WillOnce(Invoke([&]() -> Grpc::RawAsyncClientPtr {
+      return std::move(async_client);
+    }));
+    EXPECT_CALL(cluster_manager_, grpcAsyncClientManager())
+        .WillOnce(Invoke([&]() -> Grpc::AsyncClientManager& { return client_manager; }));
+    EXPECT_CALL(client_manager, factoryForGrpcService(_, _, _))
+        .WillOnce(
+            Invoke([&](const GrpcService&, Stats::Scope&, bool) -> Grpc::AsyncClientFactoryPtr {
+              return std::move(client_factory);
+            }));
+    Http::TestRequestHeaderMapImpl request_headers{{":path", "/"}};
 
-  // Destroy the Context, Plugin and VM.
-  context_.reset();
-  plugin_.reset();
-  wasm_.reset();
+    EXPECT_EQ(Http::FilterHeadersStatus::StopAllIterationAndWatermark,
+              filter().decodeHeaders(request_headers, false));
 
-  ProtobufWkt::Value value;
-  value.set_string_value("response");
-  std::string response_string;
-  EXPECT_TRUE(value.SerializeToString(&response_string));
-  auto response = std::make_unique<Buffer::OwnedImpl>(response_string);
-  EXPECT_EQ(callbacks, nullptr);
-  NiceMock<Tracing::MockSpan> span;
-  if (callbacks) {
-    callbacks->onSuccessRaw(std::move(response), span);
+    EXPECT_CALL(request, cancel()).WillOnce([&]() { callbacks = nullptr; });
+
+    // Destroy the Context, Plugin and VM.
+    context_.reset();
+    plugin_.reset();
+    plugin_handle_.reset();
+    wasm_.reset();
+
+    ProtobufWkt::Value value;
+    value.set_string_value("response");
+    std::string response_string;
+    EXPECT_TRUE(value.SerializeToString(&response_string));
+    auto response = std::make_unique<Buffer::OwnedImpl>(response_string);
+    EXPECT_EQ(callbacks, nullptr);
+    NiceMock<Tracing::MockSpan> span;
+    if (callbacks) {
+      callbacks->onSuccessRaw(std::move(response), span);
+    }
   }
 }
 
-void WasmHttpFilterTest::setupGrpcStreamTest(Grpc::RawAsyncStreamCallbacks*& callbacks) {
-  setupTest("grpc_stream");
-  setupFilter("grpc_stream");
+void WasmHttpFilterTest::setupGrpcStreamTest(Grpc::RawAsyncStreamCallbacks*& callbacks,
+                                             std::string id) {
+  setupTest(id);
+  setupFilter();
 
   EXPECT_CALL(async_client_manager_, factoryForGrpcService(_, _, _))
       .WillRepeatedly(
@@ -1060,28 +1297,45 @@ TEST_P(WasmHttpFilterTest, GrpcStream) {
     // TODO(PiotrSikora): gRPC call outs not yet supported in the Rust SDK.
     return;
   }
-  Grpc::RawAsyncStreamCallbacks* callbacks = nullptr;
-  setupGrpcStreamTest(callbacks);
+  std::array<std::string, 2> proto_or_cluster{"grpc_stream_proto", "grpc_stream"};
+  for (const auto& id : proto_or_cluster) {
+    TestScopedRuntime scoped_runtime;
+    Grpc::RawAsyncStreamCallbacks* callbacks = nullptr;
+    setupGrpcStreamTest(callbacks, id);
 
-  EXPECT_CALL(rootContext(), log_(spdlog::level::debug, Eq("response response")));
-  EXPECT_CALL(rootContext(), log_(spdlog::level::debug, Eq("close done")));
-  Http::TestRequestHeaderMapImpl request_headers{{":path", "/"}};
-  EXPECT_EQ(Http::FilterHeadersStatus::StopIteration,
-            filter().decodeHeaders(request_headers, false));
+    if (id == "grpc_stream_proto") {
+      Runtime::LoaderSingleton::getExisting()->mergeValues(
+          {{"envoy.reloadable_features.wasm_cluster_name_envoy_grpc", "false"}});
+    } else {
+      cluster_manager_.initializeThreadLocalClusters({"cluster"});
+      EXPECT_CALL(filter(), log_(spdlog::level::err,
+                                 Eq(absl::string_view("expected bogus service parse failure"))));
+      EXPECT_CALL(filter(), log_(spdlog::level::err,
+                                 Eq(absl::string_view("expected bogus method call failure"))));
+      EXPECT_CALL(filter(),
+                  log_(spdlog::level::err, Eq(absl::string_view("cluster call succeeded"))));
+    }
 
-  ProtobufWkt::Value value;
-  value.set_string_value("response");
-  std::string response_string;
-  EXPECT_TRUE(value.SerializeToString(&response_string));
-  auto response = std::make_unique<Buffer::OwnedImpl>(response_string);
-  EXPECT_NE(callbacks, nullptr);
-  if (callbacks) {
-    Http::TestRequestHeaderMapImpl create_initial_metadata{{"test", "create_initial_metadata"}};
-    callbacks->onCreateInitialMetadata(create_initial_metadata);
-    callbacks->onReceiveInitialMetadata(std::make_unique<Http::TestResponseHeaderMapImpl>());
-    callbacks->onReceiveMessageRaw(std::move(response));
-    callbacks->onReceiveTrailingMetadata(std::make_unique<Http::TestResponseTrailerMapImpl>());
-    callbacks->onRemoteClose(Grpc::Status::WellKnownGrpcStatus::Ok, "done");
+    EXPECT_CALL(rootContext(), log_(spdlog::level::debug, Eq("response response")));
+    EXPECT_CALL(rootContext(), log_(spdlog::level::debug, Eq("close done")));
+    Http::TestRequestHeaderMapImpl request_headers{{":path", "/"}};
+    EXPECT_EQ(Http::FilterHeadersStatus::StopAllIterationAndWatermark,
+              filter().decodeHeaders(request_headers, false));
+
+    ProtobufWkt::Value value;
+    value.set_string_value("response");
+    std::string response_string;
+    EXPECT_TRUE(value.SerializeToString(&response_string));
+    auto response = std::make_unique<Buffer::OwnedImpl>(response_string);
+    EXPECT_NE(callbacks, nullptr);
+    if (callbacks) {
+      Http::TestRequestHeaderMapImpl create_initial_metadata{{"test", "create_initial_metadata"}};
+      callbacks->onCreateInitialMetadata(create_initial_metadata);
+      callbacks->onReceiveInitialMetadata(std::make_unique<Http::TestResponseHeaderMapImpl>());
+      callbacks->onReceiveMessageRaw(std::move(response));
+      callbacks->onReceiveTrailingMetadata(std::make_unique<Http::TestResponseTrailerMapImpl>());
+      callbacks->onRemoteClose(Grpc::Status::WellKnownGrpcStatus::Ok, "done");
+    }
   }
 }
 
@@ -1091,27 +1345,44 @@ TEST_P(WasmHttpFilterTest, GrpcStreamCloseLocal) {
     // TODO(PiotrSikora): gRPC call outs not yet supported in the Rust SDK.
     return;
   }
-  Grpc::RawAsyncStreamCallbacks* callbacks = nullptr;
-  setupGrpcStreamTest(callbacks);
+  std::array<std::string, 2> proto_or_cluster{"grpc_stream_proto", "grpc_stream"};
+  for (const auto& id : proto_or_cluster) {
+    TestScopedRuntime scoped_runtime;
+    Grpc::RawAsyncStreamCallbacks* callbacks = nullptr;
+    setupGrpcStreamTest(callbacks, id);
 
-  EXPECT_CALL(rootContext(), log_(spdlog::level::debug, Eq("response close")));
-  EXPECT_CALL(rootContext(), log_(spdlog::level::debug, Eq("close ok")));
-  Http::TestRequestHeaderMapImpl request_headers{{":path", "/"}};
-  EXPECT_EQ(Http::FilterHeadersStatus::StopIteration,
-            filter().decodeHeaders(request_headers, false));
+    if (id == "grpc_stream_proto") {
+      Runtime::LoaderSingleton::getExisting()->mergeValues(
+          {{"envoy.reloadable_features.wasm_cluster_name_envoy_grpc", "false"}});
+    } else {
+      cluster_manager_.initializeThreadLocalClusters({"cluster"});
+      EXPECT_CALL(filter(), log_(spdlog::level::err,
+                                 Eq(absl::string_view("expected bogus service parse failure"))));
+      EXPECT_CALL(filter(), log_(spdlog::level::err,
+                                 Eq(absl::string_view("expected bogus method call failure"))));
+      EXPECT_CALL(filter(),
+                  log_(spdlog::level::err, Eq(absl::string_view("cluster call succeeded"))));
+    }
 
-  ProtobufWkt::Value value;
-  value.set_string_value("close");
-  std::string response_string;
-  EXPECT_TRUE(value.SerializeToString(&response_string));
-  auto response = std::make_unique<Buffer::OwnedImpl>(response_string);
-  EXPECT_NE(callbacks, nullptr);
-  if (callbacks) {
-    Http::TestRequestHeaderMapImpl create_initial_metadata{{"test", "create_initial_metadata"}};
-    callbacks->onCreateInitialMetadata(create_initial_metadata);
-    callbacks->onReceiveInitialMetadata(std::make_unique<Http::TestResponseHeaderMapImpl>());
-    callbacks->onReceiveMessageRaw(std::move(response));
-    callbacks->onRemoteClose(Grpc::Status::WellKnownGrpcStatus::Ok, "ok");
+    EXPECT_CALL(rootContext(), log_(spdlog::level::debug, Eq("response close")));
+    EXPECT_CALL(rootContext(), log_(spdlog::level::debug, Eq("close ok")));
+    Http::TestRequestHeaderMapImpl request_headers{{":path", "/"}};
+    EXPECT_EQ(Http::FilterHeadersStatus::StopAllIterationAndWatermark,
+              filter().decodeHeaders(request_headers, false));
+
+    ProtobufWkt::Value value;
+    value.set_string_value("close");
+    std::string response_string;
+    EXPECT_TRUE(value.SerializeToString(&response_string));
+    auto response = std::make_unique<Buffer::OwnedImpl>(response_string);
+    EXPECT_NE(callbacks, nullptr);
+    if (callbacks) {
+      Http::TestRequestHeaderMapImpl create_initial_metadata{{"test", "create_initial_metadata"}};
+      callbacks->onCreateInitialMetadata(create_initial_metadata);
+      callbacks->onReceiveInitialMetadata(std::make_unique<Http::TestResponseHeaderMapImpl>());
+      callbacks->onReceiveMessageRaw(std::move(response));
+      callbacks->onRemoteClose(Grpc::Status::WellKnownGrpcStatus::Ok, "ok");
+    }
   }
 }
 
@@ -1121,27 +1392,45 @@ TEST_P(WasmHttpFilterTest, GrpcStreamCloseRemote) {
     // TODO(PiotrSikora): gRPC call outs not yet supported in the Rust SDK.
     return;
   }
-  Grpc::RawAsyncStreamCallbacks* callbacks = nullptr;
-  setupGrpcStreamTest(callbacks);
 
-  EXPECT_CALL(rootContext(), log_(spdlog::level::debug, Eq("response response")));
-  EXPECT_CALL(rootContext(), log_(spdlog::level::debug, Eq("close close")));
-  Http::TestRequestHeaderMapImpl request_headers{{":path", "/"}};
-  EXPECT_EQ(Http::FilterHeadersStatus::StopIteration,
-            filter().decodeHeaders(request_headers, false));
+  std::array<std::string, 2> proto_or_cluster{"grpc_stream_proto", "grpc_stream"};
+  for (const auto& id : proto_or_cluster) {
+    TestScopedRuntime scoped_runtime;
+    Grpc::RawAsyncStreamCallbacks* callbacks = nullptr;
+    setupGrpcStreamTest(callbacks, id);
 
-  ProtobufWkt::Value value;
-  value.set_string_value("response");
-  std::string response_string;
-  EXPECT_TRUE(value.SerializeToString(&response_string));
-  auto response = std::make_unique<Buffer::OwnedImpl>(response_string);
-  EXPECT_NE(callbacks, nullptr);
-  if (callbacks) {
-    Http::TestRequestHeaderMapImpl create_initial_metadata{{"test", "create_initial_metadata"}};
-    callbacks->onCreateInitialMetadata(create_initial_metadata);
-    callbacks->onReceiveInitialMetadata(std::make_unique<Http::TestResponseHeaderMapImpl>());
-    callbacks->onReceiveMessageRaw(std::move(response));
-    callbacks->onRemoteClose(Grpc::Status::WellKnownGrpcStatus::Ok, "close");
+    if (id == "grpc_stream_proto") {
+      Runtime::LoaderSingleton::getExisting()->mergeValues(
+          {{"envoy.reloadable_features.wasm_cluster_name_envoy_grpc", "false"}});
+    } else {
+      cluster_manager_.initializeThreadLocalClusters({"cluster"});
+      EXPECT_CALL(filter(), log_(spdlog::level::err,
+                                 Eq(absl::string_view("expected bogus service parse failure"))));
+      EXPECT_CALL(filter(), log_(spdlog::level::err,
+                                 Eq(absl::string_view("expected bogus method call failure"))));
+      EXPECT_CALL(filter(),
+                  log_(spdlog::level::err, Eq(absl::string_view("cluster call succeeded"))));
+    }
+
+    EXPECT_CALL(rootContext(), log_(spdlog::level::debug, Eq("response response")));
+    EXPECT_CALL(rootContext(), log_(spdlog::level::debug, Eq("close close")));
+    Http::TestRequestHeaderMapImpl request_headers{{":path", "/"}};
+    EXPECT_EQ(Http::FilterHeadersStatus::StopAllIterationAndWatermark,
+              filter().decodeHeaders(request_headers, false));
+
+    ProtobufWkt::Value value;
+    value.set_string_value("response");
+    std::string response_string;
+    EXPECT_TRUE(value.SerializeToString(&response_string));
+    auto response = std::make_unique<Buffer::OwnedImpl>(response_string);
+    EXPECT_NE(callbacks, nullptr);
+    if (callbacks) {
+      Http::TestRequestHeaderMapImpl create_initial_metadata{{"test", "create_initial_metadata"}};
+      callbacks->onCreateInitialMetadata(create_initial_metadata);
+      callbacks->onReceiveInitialMetadata(std::make_unique<Http::TestResponseHeaderMapImpl>());
+      callbacks->onReceiveMessageRaw(std::move(response));
+      callbacks->onRemoteClose(Grpc::Status::WellKnownGrpcStatus::Ok, "close");
+    }
   }
 }
 
@@ -1150,25 +1439,43 @@ TEST_P(WasmHttpFilterTest, GrpcStreamCancel) {
     // TODO(PiotrSikora): gRPC call outs not yet supported in the Rust SDK.
     return;
   }
-  Grpc::RawAsyncStreamCallbacks* callbacks = nullptr;
-  setupGrpcStreamTest(callbacks);
 
-  Http::TestRequestHeaderMapImpl request_headers{{":path", "/"}};
-  EXPECT_EQ(Http::FilterHeadersStatus::StopIteration,
-            filter().decodeHeaders(request_headers, false));
+  std::array<std::string, 2> proto_or_cluster{"grpc_stream_proto", "grpc_stream"};
+  for (const auto& id : proto_or_cluster) {
+    TestScopedRuntime scoped_runtime;
+    Grpc::RawAsyncStreamCallbacks* callbacks = nullptr;
+    setupGrpcStreamTest(callbacks, id);
 
-  ProtobufWkt::Value value;
-  value.set_string_value("response");
-  std::string response_string;
-  EXPECT_TRUE(value.SerializeToString(&response_string));
-  auto response = std::make_unique<Buffer::OwnedImpl>(response_string);
-  EXPECT_NE(callbacks, nullptr);
-  NiceMock<Tracing::MockSpan> span;
-  if (callbacks) {
-    Http::TestRequestHeaderMapImpl create_initial_metadata{{"test", "create_initial_metadata"}};
-    callbacks->onCreateInitialMetadata(create_initial_metadata);
-    callbacks->onReceiveInitialMetadata(std::make_unique<Http::TestResponseHeaderMapImpl>(
-        Http::TestResponseHeaderMapImpl{{"test", "reset"}}));
+    if (id == "grpc_stream_proto") {
+      Runtime::LoaderSingleton::getExisting()->mergeValues(
+          {{"envoy.reloadable_features.wasm_cluster_name_envoy_grpc", "false"}});
+    } else {
+      cluster_manager_.initializeThreadLocalClusters({"cluster"});
+      EXPECT_CALL(filter(), log_(spdlog::level::err,
+                                 Eq(absl::string_view("expected bogus service parse failure"))));
+      EXPECT_CALL(filter(), log_(spdlog::level::err,
+                                 Eq(absl::string_view("expected bogus method call failure"))));
+      EXPECT_CALL(filter(),
+                  log_(spdlog::level::err, Eq(absl::string_view("cluster call succeeded"))));
+    }
+
+    Http::TestRequestHeaderMapImpl request_headers{{":path", "/"}};
+    EXPECT_EQ(Http::FilterHeadersStatus::StopAllIterationAndWatermark,
+              filter().decodeHeaders(request_headers, false));
+
+    ProtobufWkt::Value value;
+    value.set_string_value("response");
+    std::string response_string;
+    EXPECT_TRUE(value.SerializeToString(&response_string));
+    auto response = std::make_unique<Buffer::OwnedImpl>(response_string);
+    EXPECT_NE(callbacks, nullptr);
+    NiceMock<Tracing::MockSpan> span;
+    if (callbacks) {
+      Http::TestRequestHeaderMapImpl create_initial_metadata{{"test", "create_initial_metadata"}};
+      callbacks->onCreateInitialMetadata(create_initial_metadata);
+      callbacks->onReceiveInitialMetadata(std::make_unique<Http::TestResponseHeaderMapImpl>(
+          Http::TestResponseHeaderMapImpl{{"test", "reset"}}));
+    }
   }
 }
 
@@ -1177,39 +1484,60 @@ TEST_P(WasmHttpFilterTest, GrpcStreamOpenAtShutdown) {
     // TODO(PiotrSikora): gRPC call outs not yet supported in the Rust SDK.
     return;
   }
-  Grpc::RawAsyncStreamCallbacks* callbacks = nullptr;
-  setupGrpcStreamTest(callbacks);
 
-  EXPECT_CALL(rootContext(), log_(spdlog::level::debug, Eq("response response")));
-  Http::TestRequestHeaderMapImpl request_headers{{":path", "/"}};
-  EXPECT_EQ(Http::FilterHeadersStatus::StopIteration,
-            filter().decodeHeaders(request_headers, false));
+  std::array<std::string, 2> proto_or_cluster{"grpc_stream_proto", "grpc_stream"};
+  for (const auto& id : proto_or_cluster) {
+    TestScopedRuntime scoped_runtime;
+    Grpc::RawAsyncStreamCallbacks* callbacks = nullptr;
+    setupGrpcStreamTest(callbacks, id);
 
-  ProtobufWkt::Value value;
-  value.set_string_value("response");
-  std::string response_string;
-  EXPECT_TRUE(value.SerializeToString(&response_string));
-  auto response = std::make_unique<Buffer::OwnedImpl>(response_string);
-  EXPECT_NE(callbacks, nullptr);
-  NiceMock<Tracing::MockSpan> span;
-  if (callbacks) {
-    Http::TestRequestHeaderMapImpl create_initial_metadata{{"test", "create_initial_metadata"}};
-    callbacks->onCreateInitialMetadata(create_initial_metadata);
-    callbacks->onReceiveInitialMetadata(std::make_unique<Http::TestResponseHeaderMapImpl>());
-    callbacks->onReceiveMessageRaw(std::move(response));
-    callbacks->onReceiveTrailingMetadata(std::make_unique<Http::TestResponseTrailerMapImpl>());
+    if (id == "grpc_stream_proto") {
+      Runtime::LoaderSingleton::getExisting()->mergeValues(
+          {{"envoy.reloadable_features.wasm_cluster_name_envoy_grpc", "false"}});
+    } else {
+      cluster_manager_.initializeThreadLocalClusters({"cluster"});
+      EXPECT_CALL(filter(), log_(spdlog::level::err,
+                                 Eq(absl::string_view("expected bogus service parse failure"))));
+      EXPECT_CALL(filter(), log_(spdlog::level::err,
+                                 Eq(absl::string_view("expected bogus method call failure"))));
+      EXPECT_CALL(filter(),
+                  log_(spdlog::level::err, Eq(absl::string_view("cluster call succeeded"))));
+    }
+
+    EXPECT_CALL(rootContext(), log_(spdlog::level::debug, Eq("response response")));
+    Http::TestRequestHeaderMapImpl request_headers{{":path", "/"}};
+    EXPECT_EQ(Http::FilterHeadersStatus::StopAllIterationAndWatermark,
+              filter().decodeHeaders(request_headers, false));
+
+    ProtobufWkt::Value value;
+    value.set_string_value("response");
+    std::string response_string;
+    EXPECT_TRUE(value.SerializeToString(&response_string));
+    auto response = std::make_unique<Buffer::OwnedImpl>(response_string);
+    EXPECT_NE(callbacks, nullptr);
+    NiceMock<Tracing::MockSpan> span;
+    if (callbacks) {
+      Http::TestRequestHeaderMapImpl create_initial_metadata{{"test", "create_initial_metadata"}};
+      callbacks->onCreateInitialMetadata(create_initial_metadata);
+      callbacks->onReceiveInitialMetadata(std::make_unique<Http::TestResponseHeaderMapImpl>());
+      callbacks->onReceiveMessageRaw(std::move(response));
+      callbacks->onReceiveTrailingMetadata(std::make_unique<Http::TestResponseTrailerMapImpl>());
+    }
+
+    // Destroy the Context, Plugin and VM.
+    context_.reset();
+    plugin_.reset();
+    plugin_handle_.reset();
+    wasm_.reset();
   }
-
-  // Destroy the Context, Plugin and VM.
-  context_.reset();
-  plugin_.reset();
-  wasm_.reset();
 }
 
 // Test metadata access including CEL expressions.
-// TODO: re-enable this on Windows if and when the CEL `Antlr` parser compiles on Windows.
-#if defined(ENVOY_WASM_V8) || defined(ENVOY_WASM_WAVM)
 TEST_P(WasmHttpFilterTest, Metadata) {
+#ifdef WIN32
+  // TODO: re-enable this on Windows if and when the CEL `Antlr` parser compiles on Windows.
+  GTEST_SKIP() << "Skipping on Windows";
+#endif
   setupTest("", "metadata");
   setupFilter();
   envoy::config::core::v3::Node node_data;
@@ -1256,14 +1584,14 @@ TEST_P(WasmHttpFilterTest, Metadata) {
   StreamInfo::MockStreamInfo log_stream_info;
   filter().log(&request_headers, nullptr, nullptr, log_stream_info);
 
-  const auto& result = request_stream_info_.filterState()->getDataReadOnly<Common::Wasm::WasmState>(
-      "wasm.wasm_request_set_key");
+  const auto& result =
+      request_stream_info_.filterState()->getDataReadOnly<Filters::Common::Expr::CelState>(
+          "wasm.wasm_request_set_key");
   EXPECT_EQ("wasm_request_set_value", result.value());
 
   filter().onDestroy();
   filter().onDestroy(); // Does nothing.
 }
-#endif
 
 TEST_P(WasmHttpFilterTest, Property) {
   if (std::get<1>(GetParam()) == "rust") {
@@ -1294,6 +1622,8 @@ TEST_P(WasmHttpFilterTest, Property) {
               log_(spdlog::level::warn, Eq(absl::string_view("metadata: wasm_request_get_value"))));
   EXPECT_CALL(filter(), log_(spdlog::level::warn, Eq(absl::string_view("response.code: 403"))));
   EXPECT_CALL(filter(), log_(spdlog::level::warn, Eq(absl::string_view("state: wasm_value"))));
+  EXPECT_CALL(filter(),
+              log_(spdlog::level::warn, Eq(absl::string_view("upstream host metadata: endpoint"))));
 
   root_context_->onTick(0);
   Http::TestRequestHeaderMapImpl request_headers{{":path", "/test_context"}};
@@ -1306,6 +1636,54 @@ TEST_P(WasmHttpFilterTest, Property) {
   EXPECT_CALL(encoder_callbacks_, connection()).WillRepeatedly(Return(&connection));
   NiceMock<Router::MockRouteEntry> route_entry;
   EXPECT_CALL(request_stream_info_, routeEntry()).WillRepeatedly(Return(&route_entry));
+  std::shared_ptr<NiceMock<Envoy::Upstream::MockHostDescription>> host_description(
+      new NiceMock<Envoy::Upstream::MockHostDescription>());
+  auto metadata = std::make_shared<envoy::config::core::v3::Metadata>(
+      TestUtility::parseYaml<envoy::config::core::v3::Metadata>(
+          R"EOF(
+        filter_metadata:
+          namespace:
+            key: endpoint
+      )EOF"));
+  EXPECT_CALL(*host_description, metadata()).WillRepeatedly(Return(metadata));
+  EXPECT_CALL(request_stream_info_, upstreamHost()).WillRepeatedly(Return(host_description));
+  filter().log(&request_headers, nullptr, nullptr, log_stream_info);
+}
+
+TEST_P(WasmHttpFilterTest, ClusterMetadata) {
+  if (std::get<1>(GetParam()) == "rust") {
+    // TODO(PiotrSikora): test not yet implemented using Rust SDK.
+    return;
+  }
+  setupTest("", "cluster_metadata");
+  setupFilter();
+  EXPECT_CALL(filter(),
+              log_(spdlog::level::warn, Eq(absl::string_view("cluster metadata: cluster"))));
+  auto cluster = std::make_shared<NiceMock<Upstream::MockClusterInfo>>();
+  auto cluster_metadata = std::make_shared<envoy::config::core::v3::Metadata>(
+      TestUtility::parseYaml<envoy::config::core::v3::Metadata>(
+          R"EOF(
+      filter_metadata:
+        namespace:
+          key: cluster
+    )EOF"));
+
+  std::shared_ptr<NiceMock<Envoy::Upstream::MockHostDescription>> host_description(
+      new NiceMock<Envoy::Upstream::MockHostDescription>());
+  StreamInfo::MockStreamInfo log_stream_info;
+  Http::TestRequestHeaderMapImpl request_headers{{}};
+
+  EXPECT_CALL(encoder_callbacks_, streamInfo()).WillRepeatedly(ReturnRef(request_stream_info_));
+  EXPECT_CALL(*cluster, metadata()).WillRepeatedly(ReturnRef(*cluster_metadata));
+  EXPECT_CALL(*host_description, cluster()).WillRepeatedly(ReturnRef(*cluster));
+  EXPECT_CALL(request_stream_info_, upstreamHost()).WillRepeatedly(Return(host_description));
+  filter().log(&request_headers, nullptr, nullptr, log_stream_info);
+
+  // If upstream host is empty, fallback to upstream cluster info for cluster metadata.
+  EXPECT_CALL(request_stream_info_, upstreamHost()).WillRepeatedly(Return(nullptr));
+  EXPECT_CALL(request_stream_info_, upstreamClusterInfo()).WillRepeatedly(Return(cluster));
+  EXPECT_CALL(filter(),
+              log_(spdlog::level::warn, Eq(absl::string_view("cluster metadata: cluster"))));
   filter().log(&request_headers, nullptr, nullptr, log_stream_info);
 }
 
@@ -1331,11 +1709,23 @@ TEST_P(WasmHttpFilterTest, SharedData) {
 
 TEST_P(WasmHttpFilterTest, SharedQueue) {
   setupTest("shared_queue");
-  setupFilter("shared_queue");
+  setupFilter();
+  EXPECT_CALL(filter(),
+              log_(spdlog::level::warn,
+                   Eq(absl::string_view("onRequestHeaders not found self/bad_shared_queue"))));
+  EXPECT_CALL(filter(),
+              log_(spdlog::level::warn,
+                   Eq(absl::string_view("onRequestHeaders not found vm_id/bad_shared_queue"))));
+  EXPECT_CALL(filter(),
+              log_(spdlog::level::warn,
+                   Eq(absl::string_view("onRequestHeaders not found bad_vm_id/bad_shared_queue"))));
+  EXPECT_CALL(filter(), log_(spdlog::level::warn,
+                             Eq(absl::string_view("onRequestHeaders found self/my_shared_queue"))));
+  EXPECT_CALL(filter(),
+              log_(spdlog::level::warn,
+                   Eq(absl::string_view("onRequestHeaders found vm_id/my_shared_queue"))));
   EXPECT_CALL(filter(),
               log_(spdlog::level::warn, Eq(absl::string_view("onRequestHeaders enqueue Ok"))));
-  EXPECT_CALL(filter(), log_(spdlog::level::warn,
-                             Eq(absl::string_view("onRequestHeaders not found bad_shared_queue"))));
   EXPECT_CALL(rootContext(),
               log_(spdlog::level::warn, Eq(absl::string_view("onQueueReady bad token not found"))))
       .Times(2);
@@ -1370,7 +1760,7 @@ TEST_P(WasmHttpFilterTest, RootId1) {
     return;
   }
   setupTest("context1");
-  setupFilter("context1");
+  setupFilter();
   EXPECT_CALL(filter(), log_(spdlog::level::debug, Eq(absl::string_view("onRequestHeaders1 2"))));
   Http::TestRequestHeaderMapImpl request_headers;
   EXPECT_EQ(Http::FilterHeadersStatus::Continue, filter().decodeHeaders(request_headers, true));
@@ -1383,10 +1773,11 @@ TEST_P(WasmHttpFilterTest, RootId2) {
     return;
   }
   setupTest("context2");
-  setupFilter("context2");
+  setupFilter();
   EXPECT_CALL(filter(), log_(spdlog::level::debug, Eq(absl::string_view("onRequestHeaders2 2"))));
   Http::TestRequestHeaderMapImpl request_headers;
-  EXPECT_EQ(Http::FilterHeadersStatus::Continue, filter().decodeHeaders(request_headers, true));
+  EXPECT_EQ(Http::FilterHeadersStatus::StopAllIterationAndWatermark,
+            filter().decodeHeaders(request_headers, true));
 }
 
 } // namespace Wasm

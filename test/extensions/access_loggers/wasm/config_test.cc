@@ -9,6 +9,7 @@
 #include "extensions/access_loggers/well_known_names.h"
 #include "extensions/common/wasm/wasm.h"
 
+#include "test/extensions/common/wasm/wasm_runtime.h"
 #include "test/mocks/server/mocks.h"
 #include "test/test_common/environment.h"
 #include "test/test_common/printers.h"
@@ -22,34 +23,21 @@ namespace Extensions {
 namespace AccessLoggers {
 namespace Wasm {
 
-class TestFactoryContext : public NiceMock<Server::Configuration::MockFactoryContext> {
+class TestFactoryContext : public NiceMock<Server::Configuration::MockServerFactoryContext> {
 public:
   TestFactoryContext(Api::Api& api, Stats::Scope& scope) : api_(api), scope_(scope) {}
   Api::Api& api() override { return api_; }
   Stats::Scope& scope() override { return scope_; }
-  const envoy::config::core::v3::Metadata& listenerMetadata() const override {
-    return listener_metadata_;
-  }
 
 private:
   Api::Api& api_;
   Stats::Scope& scope_;
-  envoy::config::core::v3::Metadata listener_metadata_;
 };
 
 class WasmAccessLogConfigTest : public testing::TestWithParam<std::string> {};
 
-// NB: this is required by VC++ which can not handle the use of macros in the macro definitions
-// used by INSTANTIATE_TEST_SUITE_P.
-auto testing_values = testing::Values(
-#if defined(ENVOY_WASM_V8)
-    "v8",
-#endif
-#if defined(ENVOY_WASM_WAVM)
-    "wavm",
-#endif
-    "null");
-INSTANTIATE_TEST_SUITE_P(Runtimes, WasmAccessLogConfigTest, testing_values);
+INSTANTIATE_TEST_SUITE_P(Runtimes, WasmAccessLogConfigTest,
+                         Envoy::Extensions::Common::Wasm::runtime_values);
 
 TEST_P(WasmAccessLogConfigTest, CreateWasmFromEmpty) {
   auto factory =
@@ -61,7 +49,7 @@ TEST_P(WasmAccessLogConfigTest, CreateWasmFromEmpty) {
   ASSERT_NE(nullptr, message);
 
   AccessLog::FilterPtr filter;
-  NiceMock<Server::Configuration::MockFactoryContext> context;
+  NiceMock<Server::Configuration::MockServerFactoryContext> context;
 
   AccessLog::InstanceSharedPtr instance;
   EXPECT_THROW_WITH_MESSAGE(
@@ -70,6 +58,12 @@ TEST_P(WasmAccessLogConfigTest, CreateWasmFromEmpty) {
 }
 
 TEST_P(WasmAccessLogConfigTest, CreateWasmFromWASM) {
+#if defined(__aarch64__)
+  // TODO(PiotrSikora): There are no Emscripten releases for arm64.
+  if (GetParam() != "null") {
+    return;
+  }
+#endif
   auto factory =
       Registry::FactoryRegistry<Server::Configuration::AccessLogInstanceFactory>::getFactory(
           AccessLogNames::get().Wasm);

@@ -3,6 +3,7 @@
 #include <functional>
 #include <string>
 
+#include "envoy/api/api.h"
 #include "envoy/extensions/transport_sockets/tls/v3/cert.pb.h"
 #include "envoy/ssl/certificate_validation_context_config.h"
 #include "envoy/ssl/connection.h"
@@ -24,10 +25,12 @@ public:
   ~MockContextManager() override;
 
   MOCK_METHOD(ClientContextSharedPtr, createSslClientContext,
-              (Stats::Scope & scope, const ClientContextConfig& config));
+              (Stats::Scope & scope, const ClientContextConfig& config,
+               Envoy::Ssl::ClientContextSharedPtr old_context));
   MOCK_METHOD(ServerContextSharedPtr, createSslServerContext,
               (Stats::Scope & stats, const ServerContextConfig& config,
-               const std::vector<std::string>& server_names));
+               const std::vector<std::string>& server_names,
+               Envoy::Ssl::ServerContextSharedPtr old_context));
   MOCK_METHOD(size_t, daysUntilFirstCertExpires, (), (const));
   MOCK_METHOD(absl::optional<uint64_t>, secondsUntilFirstOcspResponseExpires, (), (const));
   MOCK_METHOD(void, iterateContexts, (std::function<void(const Context&)> callback));
@@ -90,11 +93,18 @@ public:
 
   MOCK_METHOD(Ssl::HandshakerFactoryCb, createHandshaker, (), (const, override));
   MOCK_METHOD(Ssl::HandshakerCapabilities, capabilities, (), (const, override));
+  MOCK_METHOD(Ssl::SslCtxCb, sslctxCb, (), (const, override));
 
   MOCK_METHOD(const std::string&, serverNameIndication, (), (const));
   MOCK_METHOD(bool, allowRenegotiation, (), (const));
   MOCK_METHOD(size_t, maxSessionKeys, (), (const));
   MOCK_METHOD(const std::string&, signingAlgorithmsForTest, (), (const));
+
+  Ssl::HandshakerCapabilities capabilities_;
+  std::string sni_{"default_sni.example.com"};
+  std::string ciphers_{"RSA"};
+  std::string alpn_{""};
+  std::string test_{};
 };
 
 class MockServerContextConfig : public ServerContextConfig {
@@ -116,6 +126,7 @@ public:
 
   MOCK_METHOD(Ssl::HandshakerFactoryCb, createHandshaker, (), (const, override));
   MOCK_METHOD(Ssl::HandshakerCapabilities, capabilities, (), (const, override));
+  MOCK_METHOD(Ssl::SslCtxCb, sslctxCb, (), (const, override));
 
   MOCK_METHOD(bool, requireClientCertificate, (), (const));
   MOCK_METHOD(OcspStaplePolicy, ocspStaplePolicy, (), (const));
@@ -151,6 +162,9 @@ public:
   MOCK_METHOD(const std::vector<std::string>&, verifyCertificateHashList, (), (const));
   MOCK_METHOD(const std::vector<std::string>&, verifyCertificateSpkiList, (), (const));
   MOCK_METHOD(bool, allowExpiredCertificate, (), (const));
+  MOCK_METHOD(const absl::optional<envoy::config::core::v3::TypedExtensionConfig>&,
+              customValidatorConfig, (), (const));
+  MOCK_METHOD(Api::Api&, api, (), (const));
   MOCK_METHOD(envoy::extensions::transport_sockets::tls::v3::CertificateValidationContext::
                   TrustChainVerification,
               trustChainVerification, (), (const));

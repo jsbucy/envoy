@@ -102,7 +102,7 @@ void DecoderImpl::initialize() {
     session_.setInTransaction(true);
   };
   BE_statements_["ROLLBACK"] = [this](DecoderImpl*) -> void {
-    callbacks_->incStatements(DecoderCallbacks::StatementType::Noop);
+    callbacks_->incStatements(DecoderCallbacks::StatementType::Other);
     callbacks_->incTransactionsRollback();
     session_.setInTransaction(false);
   };
@@ -112,7 +112,7 @@ void DecoderImpl::initialize() {
     session_.setInTransaction(true);
   };
   BE_statements_["COMMIT"] = [this](DecoderImpl*) -> void {
-    callbacks_->incStatements(DecoderCallbacks::StatementType::Noop);
+    callbacks_->incStatements(DecoderCallbacks::StatementType::Other);
     session_.setInTransaction(false);
     callbacks_->incTransactionsCommit();
   };
@@ -176,13 +176,13 @@ void DecoderImpl::initialize() {
   };
 }
 
-bool DecoderImpl::parseMessage(Buffer::Instance& data) {
+Decoder::Result DecoderImpl::parseHeader(Buffer::Instance& data) {
   ENVOY_LOG(trace, "postgres_proxy: parsing message, len {}", data.length());
 
   // The minimum size of the message sufficient for parsing is 5 bytes.
   if (data.length() < 5) {
     // not enough data in the buffer.
-    return false;
+    return Decoder::NeedMoreData;
   }
 
   if (!startup_) {
@@ -198,7 +198,7 @@ bool DecoderImpl::parseMessage(Buffer::Instance& data) {
     ENVOY_LOG(trace, "postgres_proxy: cannot parse message. Need {} bytes in buffer",
               message_len_ + (startup_ ? 0 : 1));
     // Not enough data in the buffer.
-    return false;
+    return Decoder::NeedMoreData;
   }
 
   if (startup_) {
@@ -206,40 +206,56 @@ bool DecoderImpl::parseMessage(Buffer::Instance& data) {
     // Startup message with 1234 in the most significant 16 bits
     // indicate request to encrypt.
     if (code >= 0x04d20000) {
-      ENVOY_LOG(trace, "postgres_proxy: detected encrypted traffic.");
       encrypted_ = true;
-      startup_ = false;
-      incSessionsEncrypted();
+      // Handler for SSLRequest (Int32(80877103) = 0x04d2162f)
+      // See details in https://www.postgresql.org/docs/current/protocol-message-formats.html.
+      if (code == 0x04d2162f) {
+        // Notify the filter that `SSLRequest` message was decoded.
+        // If the filter returns true, it means to pass the message upstream
+        // to the server. If it returns false it means, that filter will try
+        // to terminate SSL session and SSLRequest should not be passed to the
+        // server.
+        encrypted_ = callbacks_->onSSLRequest();
+      }
+
+      // Count it as recognized frontend message.
+      callbacks_->incMessagesFrontend();
+      if (encrypted_) {
+        ENVOY_LOG(trace, "postgres_proxy: detected encrypted traffic.");
+        incSessionsEncrypted();
+        startup_ = false;
+      }
       data.drain(data.length());
-      return false;
+      return encrypted_ ? Decoder::ReadyForNext : Decoder::Stopped;
     } else {
       ENVOY_LOG(debug, "Detected version {}.{} of Postgres", code >> 16, code & 0x0000FFFF);
-      // 4 bytes of length and 4 bytes of version code.
     }
   }
 
   data.drain(startup_ ? 4 : 5); // Length plus optional 1st byte.
 
-  uint32_t bytes_to_read = message_len_ - 4;
-  message.assign(std::string(static_cast<char*>(data.linearize(bytes_to_read)), bytes_to_read));
-  setMessage(message);
-
   ENVOY_LOG(trace, "postgres_proxy: msg parsed");
-  return true;
+  return Decoder::ReadyForNext;
 }
 
-bool DecoderImpl::onData(Buffer::Instance& data, bool frontend) {
+Decoder::Result DecoderImpl::onData(Buffer::Instance& data, bool frontend) {
   // If encrypted, just drain the traffic.
   if (encrypted_) {
     ENVOY_LOG(trace, "postgres_proxy: ignoring {} bytes of encrypted data", data.length());
     data.drain(data.length());
-    return true;
+    return Decoder::ReadyForNext;
+  }
+
+  if (!frontend && startup_) {
+    data.drain(data.length());
+    return Decoder::ReadyForNext;
   }
 
   ENVOY_LOG(trace, "postgres_proxy: decoding {} bytes", data.length());
 
-  if (!parseMessage(data)) {
-    return false;
+  const Decoder::Result result = parseHeader(data);
+  if (result != Decoder::ReadyForNext || encrypted_) {
+    return result;
   }
 
   MsgGroup& msg_processor = std::ref(frontend ? FE_messages_ : BE_messages_);
@@ -259,15 +275,24 @@ bool DecoderImpl::onData(Buffer::Instance& data, bool frontend) {
     }
   }
 
-  std::vector<MsgAction>& actions = std::get<2>(msg.get());
-  for (const auto& action : actions) {
-    action(this);
-  }
-
   // message_len_ specifies total message length including 4 bytes long
   // "length" field. The length of message body is total length minus size
   // of "length" field (4 bytes).
   uint32_t bytes_to_read = message_len_ - 4;
+
+  std::vector<MsgAction>& actions = std::get<2>(msg.get());
+  if (!actions.empty()) {
+    // Linearize the message for processing.
+    message_.assign(std::string(static_cast<char*>(data.linearize(bytes_to_read)), bytes_to_read));
+
+    // Invoke actions associated with the type of received message.
+    for (const auto& action : actions) {
+      action(this);
+    }
+
+    // Drop the linearized message.
+    message_.erase();
+  }
 
   ENVOY_LOG(debug, "({}) command = {} ({})", msg_processor.direction_, command_,
             std::get<0>(msg.get()));
@@ -278,7 +303,7 @@ bool DecoderImpl::onData(Buffer::Instance& data, bool frontend) {
   data.drain(bytes_to_read);
   ENVOY_LOG(trace, "postgres_proxy: {} bytes remaining in buffer", data.length());
 
-  return true;
+  return Decoder::ReadyForNext;
 }
 
 // Method is called when C (CommandComplete) message has been
@@ -287,8 +312,14 @@ bool DecoderImpl::onData(Buffer::Instance& data, bool frontend) {
 void DecoderImpl::decodeBackendStatements() {
   // The message_ contains the statement. Find space character
   // and the statement is the first word. If space cannot be found
-  // take the whole message.
-  std::string statement = message_.substr(0, message_.find(' '));
+  // try to find for the null terminator character (\0).
+  std::size_t position = message_.find(' ');
+  if (position == std::string::npos) {
+    // If the null terminator character (\0) cannot be found then
+    // take the whole message.
+    position = message_.find('\0');
+  }
+  const std::string statement = message_.substr(0, position);
 
   auto it = BE_statements_.find(statement);
   if (it != BE_statements_.end()) {

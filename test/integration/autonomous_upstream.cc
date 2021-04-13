@@ -21,7 +21,9 @@ const char AutonomousStream::RESPONSE_SIZE_BYTES[] = "response_size_bytes";
 const char AutonomousStream::RESPONSE_DATA_BLOCKS[] = "response_data_blocks";
 const char AutonomousStream::EXPECT_REQUEST_SIZE_BYTES[] = "expect_request_size_bytes";
 const char AutonomousStream::RESET_AFTER_REQUEST[] = "reset_after_request";
+const char AutonomousStream::CLOSE_AFTER_RESPONSE[] = "close_after_response";
 const char AutonomousStream::NO_TRAILERS[] = "no_trailers";
+const char AutonomousStream::NO_END_STREAM[] = "no_end_stream";
 
 AutonomousStream::AutonomousStream(FakeHttpConnection& parent, Http::ResponseEncoder& encoder,
                                    AutonomousUpstream& upstream, bool allow_incomplete_streams)
@@ -64,8 +66,9 @@ void AutonomousStream::sendResponse() {
   int32_t response_data_blocks = 1;
   HeaderToInt(RESPONSE_DATA_BLOCKS, response_data_blocks, headers);
 
-  const bool send_trailers = headers.get_(NO_TRAILERS).empty();
-  const bool headers_only_response = !send_trailers && response_data_blocks == 0;
+  const bool end_stream = headers.get_(NO_END_STREAM).empty();
+  const bool send_trailers = end_stream && headers.get_(NO_TRAILERS).empty();
+  const bool headers_only_response = !send_trailers && response_data_blocks == 0 && end_stream;
 
   pre_response_headers_metadata_ = upstream_.preResponseHeadersMetadata();
   if (pre_response_headers_metadata_) {
@@ -75,11 +78,17 @@ void AutonomousStream::sendResponse() {
   encodeHeaders(upstream_.responseHeaders(), headers_only_response);
   if (!headers_only_response) {
     for (int32_t i = 0; i < response_data_blocks; ++i) {
-      encodeData(response_body_length, i == (response_data_blocks - 1) && !send_trailers);
+      encodeData(response_body_length,
+                 i == (response_data_blocks - 1) && !send_trailers && end_stream);
     }
     if (send_trailers) {
       encodeTrailers(upstream_.responseTrailers());
     }
+  }
+  if (!headers.get_(CLOSE_AFTER_RESPONSE).empty()) {
+    parent_.connection().dispatcher().post(
+        [this]() -> void { parent_.connection().close(Network::ConnectionCloseType::FlushWrite); });
+    return;
   }
 }
 
@@ -110,8 +119,7 @@ bool AutonomousUpstream::createNetworkFilterChain(Network::Connection& connectio
   shared_connections_.emplace_back(new SharedConnectionWrapper(connection));
   AutonomousHttpConnectionPtr http_connection(
       new AutonomousHttpConnection(*this, *shared_connections_.back(), http_type_, *this));
-  testing::AssertionResult result = http_connection->initialize();
-  RELEASE_ASSERT(result, result.message());
+  http_connection->initialize();
   http_connections_.push_back(std::move(http_connection));
   return true;
 }
@@ -164,6 +172,16 @@ Http::TestResponseHeaderMapImpl AutonomousUpstream::responseHeaders() {
 std::unique_ptr<Http::MetadataMapVector> AutonomousUpstream::preResponseHeadersMetadata() {
   Thread::LockGuard lock(headers_lock_);
   return std::move(pre_response_headers_metadata_);
+}
+
+AssertionResult AutonomousUpstream::closeConnection(uint32_t index,
+                                                    std::chrono::milliseconds timeout) {
+  return shared_connections_[index]->executeOnDispatcher(
+      [](Network::Connection& connection) {
+        ASSERT(connection.state() == Network::Connection::State::Open);
+        connection.close(Network::ConnectionCloseType::FlushWrite);
+      },
+      timeout);
 }
 
 } // namespace Envoy

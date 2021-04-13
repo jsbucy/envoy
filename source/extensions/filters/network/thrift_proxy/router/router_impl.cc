@@ -226,7 +226,7 @@ FilterStatus Router::messageBegin(MessageMetadataSharedPtr metadata) {
   route_entry_ = route_->routeEntry();
   const std::string& cluster_name = route_entry_->clusterName();
 
-  Upstream::ThreadLocalCluster* cluster = cluster_manager_.get(cluster_name);
+  Upstream::ThreadLocalCluster* cluster = cluster_manager_.getThreadLocalCluster(cluster_name);
   if (!cluster) {
     ENVOY_STREAM_LOG(debug, "unknown cluster '{}'", *callbacks_, cluster_name);
     stats_.unknown_cluster_.inc();
@@ -239,6 +239,19 @@ FilterStatus Router::messageBegin(MessageMetadataSharedPtr metadata) {
   cluster_ = cluster->info();
   ENVOY_STREAM_LOG(debug, "cluster '{}' match for method '{}'", *callbacks_, cluster_name,
                    metadata->methodName());
+  switch (metadata->messageType()) {
+  case MessageType::Call:
+    incClusterScopeCounter(request_call_);
+    break;
+
+  case MessageType::Oneway:
+    incClusterScopeCounter(request_oneway_);
+    break;
+
+  default:
+    incClusterScopeCounter(request_invalid_type_);
+    break;
+  }
 
   if (cluster_->maintenanceMode()) {
     stats_.upstream_rq_maintenance_mode_.inc();
@@ -262,8 +275,14 @@ FilterStatus Router::messageBegin(MessageMetadataSharedPtr metadata) {
                                         : callbacks_->downstreamProtocolType();
   ASSERT(protocol != ProtocolType::Auto);
 
-  Tcp::ConnectionPool::Instance* conn_pool = cluster_manager_.tcpConnPoolForCluster(
-      cluster_name, Upstream::ResourcePriority::Default, this);
+  if (callbacks_->downstreamTransportType() == TransportType::Framed &&
+      transport == TransportType::Framed && callbacks_->downstreamProtocolType() == protocol &&
+      protocol != ProtocolType::Twitter) {
+    passthrough_supported_ = true;
+  }
+
+  Tcp::ConnectionPool::Instance* conn_pool =
+      cluster->tcpConnPool(Upstream::ResourcePriority::Default, this);
   if (!conn_pool) {
     stats_.no_healthy_upstream_.inc();
     callbacks_->sendLocalReply(
@@ -332,6 +351,24 @@ void Router::onUpstreamData(Buffer::Instance& data, bool end_stream) {
     ThriftFilters::ResponseStatus status = callbacks_->upstreamData(data);
     if (status == ThriftFilters::ResponseStatus::Complete) {
       ENVOY_STREAM_LOG(debug, "response complete", *callbacks_);
+      switch (callbacks_->responseMetadata()->messageType()) {
+      case MessageType::Reply:
+        incClusterScopeCounter(response_reply_);
+        if (callbacks_->responseSuccess()) {
+          incClusterScopeCounter(response_reply_success_);
+        } else {
+          incClusterScopeCounter(response_reply_error_);
+        }
+        break;
+
+      case MessageType::Exception:
+        incClusterScopeCounter(response_exception_);
+        break;
+
+      default:
+        incClusterScopeCounter(response_invalid_type_);
+        break;
+      }
       upstream_request_->onResponseComplete();
       cleanup();
       return;

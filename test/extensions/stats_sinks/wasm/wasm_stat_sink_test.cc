@@ -2,6 +2,7 @@
 
 #include "extensions/common/wasm/wasm.h"
 
+#include "test/extensions/common/wasm/wasm_runtime.h"
 #include "test/mocks/upstream/mocks.h"
 #include "test/test_common/wasm_base.h"
 
@@ -27,7 +28,7 @@ public:
     Extensions::Common::Wasm::Context::log(static_cast<spdlog::level::level_enum>(level), message);
     return proxy_wasm::WasmResult::Ok;
   }
-  MOCK_METHOD2(log_, void(spdlog::level::level_enum level, absl::string_view message));
+  MOCK_METHOD(void, log_, (spdlog::level::level_enum level, absl::string_view message));
 };
 
 class WasmCommonContextTest
@@ -36,12 +37,11 @@ public:
   WasmCommonContextTest() = default;
 
   void setup(const std::string& code, std::string root_id = "") {
-    setupBase(
-        GetParam(), code,
-        [](Wasm* wasm, const std::shared_ptr<Plugin>& plugin) -> ContextBase* {
-          return new TestContext(wasm, plugin);
-        },
-        root_id);
+    setRootId(root_id);
+    setupBase(GetParam(), code,
+              [](Wasm* wasm, const std::shared_ptr<Plugin>& plugin) -> ContextBase* {
+                return new TestContext(wasm, plugin);
+              });
   }
   void setupContext() {
     context_ = std::make_unique<TestContext>(wasm_->wasm().get(), root_context_->id(), plugin_);
@@ -54,22 +54,17 @@ public:
   std::unique_ptr<TestContext> context_;
 };
 
-// NB: this is required by VC++ which can not handle the use of macros in the macro definitions
-// used by INSTANTIATE_TEST_SUITE_P.
-auto testing_values = testing::Values(
-#if defined(ENVOY_WASM_V8)
-    "v8",
-#endif
-#if defined(ENVOY_WASM_WAVM)
-    "wavm",
-#endif
-    "null");
-INSTANTIATE_TEST_SUITE_P(Runtimes, WasmCommonContextTest, testing_values);
+INSTANTIATE_TEST_SUITE_P(Runtimes, WasmCommonContextTest,
+                         Envoy::Extensions::Common::Wasm::runtime_values);
 
 TEST_P(WasmCommonContextTest, OnStat) {
   std::string code;
   NiceMock<Stats::MockMetricSnapshot> snapshot_;
   if (GetParam() != "null") {
+#if defined(__aarch64__)
+    // TODO(PiotrSikora): There are no Emscripten releases for arm64.
+    return;
+#endif
     code = TestEnvironment::readFileToStringForTest(TestEnvironment::substitute(absl::StrCat(
         "{{ test_rundir }}/test/extensions/stats_sinks/wasm/test_data/test_context_cpp.wasm")));
   } else {

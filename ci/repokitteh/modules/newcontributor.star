@@ -4,7 +4,7 @@ Hi @%s, welcome and thank you for your contribution.
 
 We will try to review your Pull Request as quickly as possible.
 
-In the meantime, please take a look at the [contribution guidelines](https://github.com/envoyproxy/envoy/blob/master/CONTRIBUTING.md) if you have not done so already.
+In the meantime, please take a look at the [contribution guidelines](https://github.com/envoyproxy/envoy/blob/main/CONTRIBUTING.md) if you have not done so already.
 
 """
 
@@ -14,7 +14,9 @@ def get_pr_author_association(issue_number):
     path="repos/envoyproxy/envoy/pulls/%s" % issue_number)["json"]["author_association"]
 
 def is_newcontributor(issue_number):
-  return get_pr_author_association(issue_number) == "FIRST_TIME_CONTRIBUTOR"
+  return (
+    get_pr_author_association(issue_number)
+    in ["NONE", "FIRST_TIME_CONTRIBUTOR", "FIRST_TIMER"])
 
 def should_message_newcontributor(action, issue_number):
   return (

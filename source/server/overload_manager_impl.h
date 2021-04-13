@@ -6,14 +6,17 @@
 #include "envoy/api/api.h"
 #include "envoy/config/overload/v3/overload.pb.h"
 #include "envoy/event/dispatcher.h"
+#include "envoy/event/scaled_range_timer_manager.h"
 #include "envoy/protobuf/message_validator.h"
-#include "envoy/server/overload_manager.h"
+#include "envoy/server/options.h"
+#include "envoy/server/overload/overload_manager.h"
 #include "envoy/server/resource_monitor.h"
 #include "envoy/stats/scope.h"
 #include "envoy/stats/stats.h"
 #include "envoy/thread_local/thread_local.h"
 
 #include "common/common/logger.h"
+#include "common/event/scaled_range_timer_manager_impl.h"
 
 #include "absl/container/node_hash_map.h"
 #include "absl/container/node_hash_set.h"
@@ -99,23 +102,33 @@ private:
   std::vector<std::string> names_;
 };
 
+class ThreadLocalOverloadStateImpl;
+
 class OverloadManagerImpl : Logger::Loggable<Logger::Id::main>, public OverloadManager {
 public:
   OverloadManagerImpl(Event::Dispatcher& dispatcher, Stats::Scope& stats_scope,
                       ThreadLocal::SlotAllocator& slot_allocator,
                       const envoy::config::overload::v3::OverloadManager& config,
-                      ProtobufMessage::ValidationVisitor& validation_visitor, Api::Api& api);
+                      ProtobufMessage::ValidationVisitor& validation_visitor, Api::Api& api,
+                      const Server::Options& options);
 
   // Server::OverloadManager
   void start() override;
   bool registerForAction(const std::string& action, Event::Dispatcher& dispatcher,
                          OverloadActionCb callback) override;
   ThreadLocalOverloadState& getThreadLocalOverloadState() override;
+  Event::ScaledRangeTimerManagerFactory scaledTimerFactory() override;
 
   // Stop the overload manager timer and wait for any pending resource updates to complete.
   // After this returns, overload manager clients should not receive any more callbacks
   // about overload state changes.
   void stop();
+
+protected:
+  // Factory for timer managers. This allows test-only subclasses to inject a mock implementation.
+  virtual Event::ScaledRangeTimerManagerPtr createScaledRangeTimerManager(
+      Event::Dispatcher& dispatcher,
+      const Event::ScaledTimerTypeMapConstSharedPtr& timer_minimums) const;
 
 private:
   using FlushEpochId = uint64_t;
@@ -155,12 +168,14 @@ private:
 
   bool started_;
   Event::Dispatcher& dispatcher_;
-  ThreadLocal::SlotPtr tls_;
+  ThreadLocal::TypedSlot<ThreadLocalOverloadStateImpl> tls_;
   NamedOverloadActionSymbolTable action_symbol_table_;
   const std::chrono::milliseconds refresh_interval_;
   Event::TimerPtr timer_;
   absl::node_hash_map<std::string, Resource> resources_;
   absl::node_hash_map<NamedOverloadActionSymbolTable::Symbol, OverloadAction> actions_;
+
+  Event::ScaledTimerTypeMapConstSharedPtr timer_minimums_;
 
   absl::flat_hash_map<NamedOverloadActionSymbolTable::Symbol, OverloadActionState>
       state_updates_to_flush_;

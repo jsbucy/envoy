@@ -20,7 +20,6 @@
 #include "common/http/date_provider_impl.h"
 #include "common/http/exception.h"
 #include "common/http/header_utility.h"
-#include "common/http/request_id_extension_impl.h"
 #include "common/network/address_impl.h"
 #include "common/network/utility.h"
 
@@ -75,7 +74,7 @@ public:
     ON_CALL(scoped_route_config_provider_, lastUpdated())
         .WillByDefault(Return(time_system_.systemTime()));
     access_logs_.emplace_back(std::make_shared<NiceMock<AccessLog::MockInstance>>());
-    request_id_extension_ = RequestIDExtensionFactory::defaultInstance(random_);
+    request_id_extension_ = Extensions::RequestId::UUIDRequestIDExtension::defaultInstance(random_);
     forward_client_cert_ = fromClientCert(forward_client_cert);
   }
 
@@ -129,8 +128,7 @@ public:
   }
 
   // Http::ConnectionManagerConfig
-
-  RequestIDExtensionSharedPtr requestIDExtension() override { return request_id_extension_; }
+  const RequestIDExtensionSharedPtr& requestIDExtension() override { return request_id_extension_; }
   const std::list<AccessLog::InstanceSharedPtr>& accessLogs() override { return access_logs_; }
   ServerConnectionPtr createCodec(Network::Connection&, const Buffer::Instance&,
                                   ServerConnectionCallbacks&) override {
@@ -154,6 +152,9 @@ public:
   }
   std::chrono::milliseconds streamIdleTimeout() const override { return stream_idle_timeout_; }
   std::chrono::milliseconds requestTimeout() const override { return request_timeout_; }
+  std::chrono::milliseconds requestHeadersTimeout() const override {
+    return request_headers_timeout_;
+  }
   std::chrono::milliseconds delayedCloseTimeout() const override { return delayed_close_timeout_; }
   Router::RouteConfigProvider* routeConfigProvider() override {
     if (use_srds_) {
@@ -197,7 +198,7 @@ public:
   const Http::Http1Settings& http1Settings() const override { return http1_settings_; }
   bool shouldNormalizePath() const override { return false; }
   bool shouldMergeSlashes() const override { return false; }
-  bool shouldStripMatchingPort() const override { return false; }
+  Http::StripPortType stripPortType() const override { return Http::StripPortType::None; }
   envoy::config::core::v3::HttpProtocolOptions::HeadersWithUnderscoresAction
   headersWithUnderscoresAction() const override {
     return envoy::config::core::v3::HttpProtocolOptions::ALLOW;
@@ -232,6 +233,7 @@ public:
   absl::optional<std::chrono::milliseconds> max_stream_duration_;
   std::chrono::milliseconds stream_idle_timeout_{};
   std::chrono::milliseconds request_timeout_{};
+  std::chrono::milliseconds request_headers_timeout_{};
   std::chrono::milliseconds delayed_close_timeout_{};
   bool use_remote_address_{true};
   Http::ForwardClientCertType forward_client_cert_;
@@ -566,10 +568,10 @@ DEFINE_PROTO_FUZZER(const test::common::http::ConnManagerImplTestCase& input) {
   ON_CALL(Const(filter_callbacks.connection_), ssl()).WillByDefault(Return(ssl_connection));
   ON_CALL(filter_callbacks.connection_, close(_))
       .WillByDefault(InvokeWithoutArgs([&connection_alive] { connection_alive = false; }));
-  filter_callbacks.connection_.local_address_ =
-      std::make_shared<Network::Address::Ipv4Instance>("127.0.0.1");
-  filter_callbacks.connection_.remote_address_ =
-      std::make_shared<Network::Address::Ipv4Instance>("0.0.0.0");
+  filter_callbacks.connection_.stream_info_.downstream_address_provider_->setLocalAddress(
+      std::make_shared<Network::Address::Ipv4Instance>("127.0.0.1"));
+  filter_callbacks.connection_.stream_info_.downstream_address_provider_->setRemoteAddress(
+      std::make_shared<Network::Address::Ipv4Instance>("0.0.0.0"));
 
   ConnectionManagerImpl conn_manager(config, drain_close, random, http_context, runtime, local_info,
                                      cluster_manager, overload_manager, config.time_system_);

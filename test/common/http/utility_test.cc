@@ -9,6 +9,7 @@
 #include "common/common/fmt.h"
 #include "common/http/exception.h"
 #include "common/http/header_map_impl.h"
+#include "common/http/http1/settings.h"
 #include "common/http/utility.h"
 #include "common/network/address_impl.h"
 
@@ -423,34 +424,35 @@ TEST(HttpUtility, ValidateStreamErrorsWithHcm) {
 TEST(HttpUtility, ValidateStreamErrorConfigurationForHttp1) {
   envoy::config::core::v3::Http1ProtocolOptions http1_options;
   Protobuf::BoolValue hcm_value;
+  NiceMock<ProtobufMessage::MockValidationVisitor> validation_visitor;
 
   // nothing explicitly configured, default to false (i.e. default stream error behavior for HCM)
-  EXPECT_FALSE(
-      Utility::parseHttp1Settings(http1_options, hcm_value).stream_error_on_invalid_http_message_);
+  EXPECT_FALSE(Http1::parseHttp1Settings(http1_options, validation_visitor, hcm_value, false)
+                   .stream_error_on_invalid_http_message_);
 
   // http1_options.stream_error overrides HCM.stream_error
   http1_options.mutable_override_stream_error_on_invalid_http_message()->set_value(true);
   hcm_value.set_value(false);
-  EXPECT_TRUE(
-      Utility::parseHttp1Settings(http1_options, hcm_value).stream_error_on_invalid_http_message_);
+  EXPECT_TRUE(Http1::parseHttp1Settings(http1_options, validation_visitor, hcm_value, false)
+                  .stream_error_on_invalid_http_message_);
 
   // http1_options.stream_error overrides HCM.stream_error (flip boolean value)
   http1_options.mutable_override_stream_error_on_invalid_http_message()->set_value(false);
   hcm_value.set_value(true);
-  EXPECT_FALSE(
-      Utility::parseHttp1Settings(http1_options, hcm_value).stream_error_on_invalid_http_message_);
+  EXPECT_FALSE(Http1::parseHttp1Settings(http1_options, validation_visitor, hcm_value, false)
+                   .stream_error_on_invalid_http_message_);
 
   http1_options.clear_override_stream_error_on_invalid_http_message();
 
   // fallback to HCM.stream_error
   hcm_value.set_value(true);
-  EXPECT_TRUE(
-      Utility::parseHttp1Settings(http1_options, hcm_value).stream_error_on_invalid_http_message_);
+  EXPECT_TRUE(Http1::parseHttp1Settings(http1_options, validation_visitor, hcm_value, false)
+                  .stream_error_on_invalid_http_message_);
 
   // fallback to HCM.stream_error (flip boolean value)
   hcm_value.set_value(false);
-  EXPECT_FALSE(
-      Utility::parseHttp1Settings(http1_options, hcm_value).stream_error_on_invalid_http_message_);
+  EXPECT_FALSE(Http1::parseHttp1Settings(http1_options, validation_visitor, hcm_value, false)
+                   .stream_error_on_invalid_http_message_);
 }
 
 TEST(HttpUtility, getLastAddressFromXFF) {
@@ -633,6 +635,55 @@ TEST(HttpUtility, SendLocalGrpcReply) {
       Utility::LocalReplyData{true, Http::Code::PayloadTooLarge, "large", absl::nullopt, false});
 }
 
+TEST(HttpUtility, SendLocalGrpcReplyGrpcStatusAlreadyExists) {
+  MockStreamDecoderFilterCallbacks callbacks;
+  bool is_reset = false;
+
+  EXPECT_CALL(callbacks, streamInfo());
+  EXPECT_CALL(callbacks, encodeHeaders_(_, true))
+      .WillOnce(Invoke([&](const ResponseHeaderMap& headers, bool) -> void {
+        EXPECT_EQ(headers.getStatusValue(), "200");
+        EXPECT_NE(headers.GrpcStatus(), nullptr);
+        EXPECT_EQ(headers.getGrpcStatusValue(),
+                  std::to_string(enumToInt(Grpc::Status::WellKnownGrpcStatus::InvalidArgument)));
+        EXPECT_NE(headers.GrpcMessage(), nullptr);
+        EXPECT_EQ(headers.getGrpcMessageValue(), "large");
+      }));
+  Utility::sendLocalReply(
+      is_reset, callbacks,
+      Utility::LocalReplyData{true, Http::Code::PayloadTooLarge, "large",
+                              Grpc::Status::WellKnownGrpcStatus::InvalidArgument, false});
+}
+
+TEST(HttpUtility, SendLocalGrpcReplyGrpcStatusPreserved) {
+  MockStreamDecoderFilterCallbacks callbacks;
+  bool is_reset = false;
+
+  auto encode_functions =
+      Utility::EncodeFunctions{[&](ResponseHeaderMap& headers) -> void {
+                                 headers.setGrpcStatus(std::to_string(
+                                     enumToInt(Grpc::Status::WellKnownGrpcStatus::NotFound)));
+                               },
+                               nullptr,
+                               [&](ResponseHeaderMapPtr&& headers, bool end_stream) -> void {
+                                 callbacks.encodeHeaders(std::move(headers), end_stream, "");
+                               },
+                               nullptr};
+  EXPECT_CALL(callbacks, encodeHeaders_(_, true))
+      .WillOnce(Invoke([&](const ResponseHeaderMap& headers, bool) -> void {
+        EXPECT_EQ(headers.getStatusValue(), "200");
+        EXPECT_NE(headers.GrpcStatus(), nullptr);
+        EXPECT_EQ(headers.getGrpcStatusValue(),
+                  std::to_string(enumToInt(Grpc::Status::WellKnownGrpcStatus::NotFound)));
+        EXPECT_NE(headers.GrpcMessage(), nullptr);
+        EXPECT_EQ(headers.getGrpcMessageValue(), "large");
+      }));
+  Utility::sendLocalReply(
+      is_reset, encode_functions,
+      Utility::LocalReplyData{true, Http::Code::PayloadTooLarge, "large",
+                              Grpc::Status::WellKnownGrpcStatus::InvalidArgument, false});
+}
+
 TEST(HttpUtility, SendLocalGrpcReplyWithUpstreamJsonPayload) {
   MockStreamDecoderFilterCallbacks callbacks;
   bool is_reset = false;
@@ -790,6 +841,8 @@ TEST(HttpUtility, ResetReasonToString) {
   EXPECT_EQ("remote reset", Utility::resetReasonToString(Http::StreamResetReason::RemoteReset));
   EXPECT_EQ("remote refused stream reset",
             Utility::resetReasonToString(Http::StreamResetReason::RemoteRefusedStreamReset));
+  EXPECT_EQ("remote error with CONNECT request",
+            Utility::resetReasonToString(Http::StreamResetReason::ConnectError));
 }
 
 // Verify that it resolveMostSpecificPerFilterConfigGeneric works with nil routes.
@@ -1251,6 +1304,9 @@ TEST(Url, ParsingFails) {
   EXPECT_FALSE(url.initialize("random_scheme://host.com/path", false));
   EXPECT_FALSE(url.initialize("http://www.foo.com", true));
   EXPECT_FALSE(url.initialize("foo.com", true));
+  EXPECT_FALSE(url.initialize("http://[notaddress]:80/?query=param", false));
+  EXPECT_FALSE(url.initialize("http://[1::z::2]:80/?query=param", false));
+  EXPECT_FALSE(url.initialize("http://1.2.3.4:65536/?query=param", false));
 }
 
 void validateUrl(absl::string_view raw_url, absl::string_view expected_scheme,
@@ -1262,12 +1318,17 @@ void validateUrl(absl::string_view raw_url, absl::string_view expected_scheme,
   EXPECT_EQ(url.pathAndQueryParams(), expected_path);
 }
 
-void validateConnectUrl(absl::string_view raw_url, absl::string_view expected_host_port) {
+void validateConnectUrl(absl::string_view raw_url) {
   Utility::Url url;
   ASSERT_TRUE(url.initialize(raw_url, true)) << "Failed to initialize " << raw_url;
   EXPECT_TRUE(url.scheme().empty());
   EXPECT_TRUE(url.pathAndQueryParams().empty());
-  EXPECT_EQ(url.hostAndPort(), expected_host_port);
+  EXPECT_EQ(url.hostAndPort(), raw_url);
+}
+
+void invalidConnectUrl(absl::string_view raw_url) {
+  Utility::Url url;
+  ASSERT_FALSE(url.initialize(raw_url, true)) << "Unexpectedly initialized " << raw_url;
 }
 
 TEST(Url, ParsingTest) {
@@ -1302,6 +1363,14 @@ TEST(Url, ParsingTest) {
   validateUrl("http://www.host.com:80/?query=param", "http", "www.host.com:80", "/?query=param");
   validateUrl("http://www.host.com/?query=param", "http", "www.host.com", "/?query=param");
 
+  // Test with an ipv4 host address.
+  validateUrl("http://1.2.3.4/?query=param", "http", "1.2.3.4", "/?query=param");
+  validateUrl("http://1.2.3.4:80/?query=param", "http", "1.2.3.4:80", "/?query=param");
+
+  // Test with an ipv6 address
+  validateUrl("http://[1::2:3]/?query=param", "http", "[1::2:3]", "/?query=param");
+  validateUrl("http://[1::2:3]:80/?query=param", "http", "[1::2:3]:80", "/?query=param");
+
   // Test url with query parameter but without slash
   validateUrl("http://www.host.com:80?query=param", "http", "www.host.com:80", "?query=param");
   validateUrl("http://www.host.com?query=param", "http", "www.host.com", "?query=param");
@@ -1324,8 +1393,16 @@ TEST(Url, ParsingTest) {
 }
 
 TEST(Url, ParsingForConnectTest) {
-  validateConnectUrl("host.com:443", "host.com:443");
-  validateConnectUrl("host.com:80", "host.com:80");
+  validateConnectUrl("host.com:443");
+  validateConnectUrl("host.com:80");
+  validateConnectUrl("1.2.3.4:80");
+  validateConnectUrl("[1:2::3:4]:80");
+
+  invalidConnectUrl("[::12345678]:80");
+  invalidConnectUrl("[1:1:1:1:1:1:1:1:1:1:1:1:1:1:1:1:1:1:1:1:1:1:1:1:1:1:1:1:1]:80");
+  invalidConnectUrl("[1:1]:80");
+  invalidConnectUrl("[:::]:80");
+  invalidConnectUrl("[::1::]:80");
 }
 
 void validatePercentEncodingEncodeDecode(absl::string_view source,

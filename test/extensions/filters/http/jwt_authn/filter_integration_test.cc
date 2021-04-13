@@ -13,6 +13,7 @@
 #include "test/test_common/registry.h"
 
 using envoy::extensions::filters::http::jwt_authn::v3::JwtAuthentication;
+using envoy::extensions::filters::http::jwt_authn::v3::PerRouteConfig;
 using envoy::extensions::filters::network::http_connection_manager::v3::HttpFilter;
 
 namespace Envoy {
@@ -74,7 +75,7 @@ std::string getAuthFilterConfig(const std::string& config_str, bool use_local_jw
   HttpFilter filter;
   filter.set_name(HttpFilterNames::get().JwtAuthn);
   filter.mutable_typed_config()->PackFrom(proto_config);
-  return MessageUtil::getJsonStringFromMessage(filter);
+  return MessageUtil::getJsonStringFromMessageOrDie(filter);
 }
 
 std::string getFilterConfig(bool use_local_jwks) {
@@ -116,7 +117,7 @@ TEST_P(LocalJwksIntegrationTest, WithGoodToken) {
   // Verify the token is removed.
   EXPECT_TRUE(upstream_request_->headers().get(Http::CustomHeaders::get().Authorization).empty());
   upstream_request_->encodeHeaders(Http::TestResponseHeaderMapImpl{{":status", "200"}}, true);
-  response->waitForEndStream();
+  ASSERT_TRUE(response->waitForEndStream());
   ASSERT_TRUE(response->complete());
   EXPECT_EQ("200", response->headers().getStatusValue());
 }
@@ -136,7 +137,7 @@ TEST_P(LocalJwksIntegrationTest, ExpiredToken) {
       {"Authorization", "Bearer " + std::string(ExpiredToken)},
   });
 
-  response->waitForEndStream();
+  ASSERT_TRUE(response->waitForEndStream());
   ASSERT_TRUE(response->complete());
   EXPECT_EQ("401", response->headers().getStatusValue());
 }
@@ -154,7 +155,7 @@ TEST_P(LocalJwksIntegrationTest, MissingToken) {
       {":authority", "host"},
   });
 
-  response->waitForEndStream();
+  ASSERT_TRUE(response->waitForEndStream());
   ASSERT_TRUE(response->complete());
   EXPECT_EQ("401", response->headers().getStatusValue());
 }
@@ -173,7 +174,7 @@ TEST_P(LocalJwksIntegrationTest, ExpiredTokenHeadReply) {
       {"Authorization", "Bearer " + std::string(ExpiredToken)},
   });
 
-  response->waitForEndStream();
+  ASSERT_TRUE(response->waitForEndStream());
   ASSERT_TRUE(response->complete());
   EXPECT_EQ("401", response->headers().getStatusValue());
   EXPECT_NE("0", response->headers().getContentLengthValue());
@@ -197,7 +198,7 @@ TEST_P(LocalJwksIntegrationTest, NoRequiresPath) {
   waitForNextUpstreamRequest();
   upstream_request_->encodeHeaders(Http::TestResponseHeaderMapImpl{{":status", "200"}}, true);
 
-  response->waitForEndStream();
+  ASSERT_TRUE(response->waitForEndStream());
   ASSERT_TRUE(response->complete());
   EXPECT_EQ("200", response->headers().getStatusValue());
 }
@@ -220,7 +221,7 @@ TEST_P(LocalJwksIntegrationTest, CorsPreflight) {
 
   waitForNextUpstreamRequest();
   upstream_request_->encodeHeaders(Http::TestResponseHeaderMapImpl{{":status", "200"}}, true);
-  response->waitForEndStream();
+  ASSERT_TRUE(response->waitForEndStream());
   ASSERT_TRUE(response->complete());
   EXPECT_EQ("200", response->headers().getStatusValue());
 }
@@ -297,7 +298,7 @@ TEST_P(LocalJwksIntegrationTest, FilterStateRequirement) {
       upstream_request_->encodeHeaders(Http::TestResponseHeaderMapImpl{{":status", "200"}}, true);
     }
 
-    response->waitForEndStream();
+    ASSERT_TRUE(response->waitForEndStream());
     ASSERT_TRUE(response->complete());
     EXPECT_EQ(test.expected_status, response->headers().getStatusValue());
   }
@@ -395,7 +396,7 @@ TEST_P(RemoteJwksIntegrationTest, WithGoodToken) {
 
   upstream_request_->encodeHeaders(Http::TestResponseHeaderMapImpl{{":status", "200"}}, true);
 
-  response->waitForEndStream();
+  ASSERT_TRUE(response->waitForEndStream());
   ASSERT_TRUE(response->complete());
   EXPECT_EQ("200", response->headers().getStatusValue());
 
@@ -420,7 +421,7 @@ TEST_P(RemoteJwksIntegrationTest, FetchFailedJwks) {
   // Fails the jwks fetching.
   waitForJwksResponse("500", "");
 
-  response->waitForEndStream();
+  ASSERT_TRUE(response->waitForEndStream());
   ASSERT_TRUE(response->complete());
   EXPECT_EQ("401", response->headers().getStatusValue());
 
@@ -440,11 +441,146 @@ TEST_P(RemoteJwksIntegrationTest, FetchFailedMissingCluster) {
       {"Authorization", "Bearer " + std::string(GoodToken)},
   });
 
-  response->waitForEndStream();
+  ASSERT_TRUE(response->waitForEndStream());
   ASSERT_TRUE(response->complete());
   EXPECT_EQ("401", response->headers().getStatusValue());
 
   cleanup();
+}
+
+class PerRouteIntegrationTest : public HttpProtocolIntegrationTest {
+public:
+  void setup(const std::string& filter_config, const PerRouteConfig& per_route) {
+    config_helper_.addFilter(getAuthFilterConfig(filter_config, true));
+
+    config_helper_.addConfigModifier(
+        [per_route](
+            envoy::extensions::filters::network::http_connection_manager::v3::HttpConnectionManager&
+                hcm) {
+          auto* virtual_host = hcm.mutable_route_config()->mutable_virtual_hosts(0);
+          auto& per_route_any =
+              (*virtual_host->mutable_routes(0)
+                    ->mutable_typed_per_filter_config())[HttpFilterNames::get().JwtAuthn];
+          per_route_any.PackFrom(per_route);
+        });
+
+    initialize();
+  }
+};
+
+INSTANTIATE_TEST_SUITE_P(Protocols, PerRouteIntegrationTest,
+                         testing::ValuesIn(HttpProtocolIntegrationTest::getProtocolTestParams()),
+                         HttpProtocolIntegrationTest::protocolTestParamsToString);
+
+// This test verifies per-route config disabled.
+TEST_P(PerRouteIntegrationTest, PerRouteConfigDisabled) {
+  // per-route config has disabled flag.
+  PerRouteConfig per_route;
+  per_route.set_disabled(true);
+  // Use a normal filter config that requires jwt_auth.
+  setup(ExampleConfig, per_route);
+
+  codec_client_ = makeHttpConnection(lookupPort("http"));
+
+  // So the request without a JWT token is OK.
+  auto response = codec_client_->makeHeaderOnlyRequest(Http::TestRequestHeaderMapImpl{
+      {":method", "GET"},
+      {":path", "/"},
+      {":scheme", "http"},
+      {":authority", "host"},
+  });
+
+  waitForNextUpstreamRequest();
+  upstream_request_->encodeHeaders(Http::TestResponseHeaderMapImpl{{":status", "200"}}, true);
+
+  ASSERT_TRUE(response->waitForEndStream());
+  ASSERT_TRUE(response->complete());
+  EXPECT_EQ("200", response->headers().getStatusValue());
+}
+
+// This test verifies per-route config with wrong requirement_name
+TEST_P(PerRouteIntegrationTest, PerRouteConfigWrongRequireName) {
+  // A config with a requirement_map
+  const std::string filter_conf = R"(
+  providers:
+    example_provider:
+      issuer: https://example.com
+      audiences:
+      - example_service
+  requirement_map:
+    abc:
+      provider_name: "example_provider"
+)";
+
+  // Per-route config has a wrong requirement_name.
+  PerRouteConfig per_route;
+  per_route.set_requirement_name("wrong-requirement-name");
+  setup(filter_conf, per_route);
+
+  codec_client_ = makeHttpConnection(lookupPort("http"));
+
+  // So the request with a good Jwt token is rejected.
+  auto response = codec_client_->makeHeaderOnlyRequest(Http::TestRequestHeaderMapImpl{
+      {":method", "GET"},
+      {":path", "/"},
+      {":scheme", "http"},
+      {":authority", "host"},
+      {"Authorization", "Bearer " + std::string(GoodToken)},
+  });
+
+  ASSERT_TRUE(response->waitForEndStream());
+  ASSERT_TRUE(response->complete());
+  EXPECT_EQ("403", response->headers().getStatusValue());
+}
+
+// This test verifies per-route config with correct requirement_name
+TEST_P(PerRouteIntegrationTest, PerRouteConfigOK) {
+  // A config with a requirement_map
+  const std::string filter_conf = R"(
+  providers:
+    example_provider:
+      issuer: https://example.com
+      audiences:
+      - example_service
+  requirement_map:
+    abc:
+      provider_name: "example_provider"
+)";
+
+  // Per-route config with correct requirement_name
+  PerRouteConfig per_route;
+  per_route.set_requirement_name("abc");
+  setup(filter_conf, per_route);
+
+  codec_client_ = makeHttpConnection(lookupPort("http"));
+
+  // So the request with a JWT token is OK.
+  auto response = codec_client_->makeHeaderOnlyRequest(Http::TestRequestHeaderMapImpl{
+      {":method", "GET"},
+      {":path", "/"},
+      {":scheme", "http"},
+      {":authority", "host"},
+      {"Authorization", "Bearer " + std::string(GoodToken)},
+  });
+
+  waitForNextUpstreamRequest();
+  upstream_request_->encodeHeaders(Http::TestResponseHeaderMapImpl{{":status", "200"}}, true);
+
+  ASSERT_TRUE(response->waitForEndStream());
+  ASSERT_TRUE(response->complete());
+  EXPECT_EQ("200", response->headers().getStatusValue());
+
+  // A request with missing token is rejected.
+  auto response1 = codec_client_->makeHeaderOnlyRequest(Http::TestRequestHeaderMapImpl{
+      {":method", "GET"},
+      {":path", "/"},
+      {":scheme", "http"},
+      {":authority", "host"},
+  });
+
+  ASSERT_TRUE(response1->waitForEndStream());
+  ASSERT_TRUE(response1->complete());
+  EXPECT_EQ("401", response1->headers().getStatusValue());
 }
 
 } // namespace

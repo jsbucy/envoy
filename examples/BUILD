@@ -12,13 +12,22 @@ filegroup(
     srcs = glob(
         [
             "**/*.yaml",
-            "**/*.lua",
         ],
         exclude = [
             "cache/responses.yaml",
+            "dynamic-config-fs/**/*",
             "jaeger-native-tracing/*",
-            "wasm/envoy.yaml",
             "**/*docker-compose*.yaml",
         ],
     ),
+)
+
+filegroup(
+    name = "certs",
+    srcs = glob(["_extra_certs/*.pem"]),
+)
+
+filegroup(
+    name = "lua",
+    srcs = glob(["**/*.lua"]),
 )

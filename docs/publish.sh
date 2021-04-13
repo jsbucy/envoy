@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# This is run on every commit that CircleCI picks up. It assumes that docs have already been built
+# This is run on every commit that Azure Pipelines picks up. It assumes that docs have already been built
 # via docs/build.sh. The push behavior differs depending on the nature of the commit:
 # * Tag commit (e.g. v1.6.0): pushes docs to versioned location, e.g.
 #   https://www.envoyproxy.io/docs/envoy/v1.6.0/.
@@ -13,7 +13,7 @@ DOCS_DIR=generated/docs
 CHECKOUT_DIR=envoy-docs
 BUILD_SHA=$(git rev-parse HEAD)
 
-MAIN_BRANCH="refs/heads/master"
+MAIN_BRANCH="refs/heads/main"
 RELEASE_TAG_REGEX="^refs/tags/v.*"
 
 if [[ "${AZP_BRANCH}" =~ ${RELEASE_TAG_REGEX} ]]; then
@@ -25,7 +25,7 @@ else
   exit 0
 fi
 
-DOCS_MAIN_BRANCH="master"
+DOCS_MAIN_BRANCH="main"
 
 echo 'cloning'
 git clone git@github.com:envoyproxy/envoyproxy.github.io "${CHECKOUT_DIR}" -b "${DOCS_MAIN_BRANCH}" --depth 1

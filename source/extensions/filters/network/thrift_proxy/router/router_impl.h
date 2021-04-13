@@ -178,13 +178,29 @@ class Router : public Tcp::ConnectionPool::UpstreamCallbacks,
 public:
   Router(Upstream::ClusterManager& cluster_manager, const std::string& stat_prefix,
          Stats::Scope& scope)
-      : cluster_manager_(cluster_manager), stats_(generateStats(stat_prefix, scope)) {}
+      : cluster_manager_(cluster_manager), stats_(generateStats(stat_prefix, scope)),
+        stat_name_set_(scope.symbolTable().makeSet("thrift_proxy")),
+        request_call_(stat_name_set_->add("request_call")),
+        request_oneway_(stat_name_set_->add("request_oneway")),
+        request_invalid_type_(stat_name_set_->add("request_invalid_type")),
+        response_reply_(stat_name_set_->add("response_reply")),
+        response_reply_success_(stat_name_set_->add("response_success")),
+        response_reply_error_(stat_name_set_->add("response_error")),
+        response_exception_(stat_name_set_->add("response_exception")),
+        response_invalid_type_(stat_name_set_->add("response_invalid_type")),
+        passthrough_supported_(false) {}
 
   ~Router() override = default;
 
   // ThriftFilters::DecoderFilter
   void onDestroy() override;
   void setDecoderFilterCallbacks(ThriftFilters::DecoderFilterCallbacks& callbacks) override;
+  bool passthroughSupported() const override { return passthrough_supported_; }
+
+  // Stats
+  void incClusterScopeCounter(Stats::StatName name) {
+    cluster_->statsScope().counterFromStatName(name).inc();
+  }
 
   // ProtocolConverter
   FilterStatus transportBegin(MessageMetadataSharedPtr metadata) override;
@@ -257,6 +273,15 @@ private:
 
   Upstream::ClusterManager& cluster_manager_;
   RouterStats stats_;
+  Stats::StatNameSetPtr stat_name_set_;
+  const Stats::StatName request_call_;
+  const Stats::StatName request_oneway_;
+  const Stats::StatName request_invalid_type_;
+  const Stats::StatName response_reply_;
+  const Stats::StatName response_reply_success_;
+  const Stats::StatName response_reply_error_;
+  const Stats::StatName response_exception_;
+  const Stats::StatName response_invalid_type_;
 
   ThriftFilters::DecoderFilterCallbacks* callbacks_{};
   RouteConstSharedPtr route_{};
@@ -265,6 +290,8 @@ private:
 
   std::unique_ptr<UpstreamRequest> upstream_request_;
   Buffer::OwnedImpl upstream_request_buffer_;
+
+  bool passthrough_supported_ : 1;
 };
 
 } // namespace Router

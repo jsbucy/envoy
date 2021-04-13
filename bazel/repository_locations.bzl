@@ -1,51 +1,5 @@
-# Validation of content in this file is done on the bazel/repositories.bzl file to make it free of bazel
-# constructs. This is to allow this file to be loaded into Python based build and maintenance tools.
-
-# Envoy dependencies may be annotated with the following attributes:
-DEPENDENCY_ANNOTATIONS = [
-    # List of the categories describing how the dependency is being used. This attribute is used
-    # for automatic tracking of security posture of Envoy's dependencies.
-    # Possible values are documented in the USE_CATEGORIES list below.
-    # This attribute is mandatory for each dependecy.
-    "use_category",
-
-    # Attribute specifying CPE (Common Platform Enumeration, see https://nvd.nist.gov/products/cpe) ID
-    # of the dependency. The ID may be in v2.3 or v2.2 format, although v2.3 is prefferred. See
-    # https://nvd.nist.gov/products/cpe for CPE format. Use single wildcard '*' for version and vector elements
-    # i.e. 'cpe:2.3:a:nghttp2:nghttp2:*'. Use "N/A" for dependencies without CPE assigned.
-    # This attribute is optional for components with use categories listed in the
-    # USE_CATEGORIES_WITH_CPE_OPTIONAL
-    "cpe",
-]
-
-# NOTE: If a dependency use case is either dataplane or controlplane, the other uses are not needed
-# to be declared.
-USE_CATEGORIES = [
-    # This dependency is used in API protos.
-    "api",
-    # This dependency is used in build process.
-    "build",
-    # This dependency is used to process xDS requests.
-    "controlplane",
-    # This dependency is used in processing downstream or upstream requests (core).
-    "dataplane_core",
-    # This dependency is used in processing downstream or upstream requests (extensions).
-    "dataplane_ext",
-    # This dependecy is used for logging, metrics or tracing (core). It may process unstrusted input.
-    "observability_core",
-    # This dependecy is used for logging, metrics or tracing (extensions). It may process unstrusted input.
-    "observability_ext",
-    # This dependency does not handle untrusted data and is used for various utility purposes.
-    "other",
-    # This dependency is used only in tests.
-    "test_only",
-]
-
-# Components with these use categories are not required to specify the 'cpe'
-# and 'last_updated' annotation.
-USE_CATEGORIES_WITH_CPE_OPTIONAL = ["build", "other", "test_only"]
-
-DEPENDENCY_REPOSITORIES_SPEC = dict(
+# This should match the schema defined in external_deps.bzl.
+REPOSITORY_LOCATIONS_SPEC = dict(
     bazel_compdb = dict(
         project_name = "bazel-compilation-database",
         project_desc = "Clang JSON compilation database support for Bazel",
@@ -54,31 +8,31 @@ DEPENDENCY_REPOSITORIES_SPEC = dict(
         sha256 = "bcecfd622c4ef272fd4ba42726a52e140b961c4eac23025f18b346c968a8cfb4",
         strip_prefix = "bazel-compilation-database-{version}",
         urls = ["https://github.com/grailbio/bazel-compilation-database/archive/{version}.tar.gz"],
-        last_updated = "2020-08-01",
+        release_date = "2020-08-01",
         use_category = ["build"],
     ),
     bazel_gazelle = dict(
         project_name = "Gazelle",
         project_desc = "Bazel BUILD file generator for Go projects",
         project_url = "https://github.com/bazelbuild/bazel-gazelle",
-        version = "0.21.1",
-        sha256 = "cdb02a887a7187ea4d5a27452311a75ed8637379a1287d8eeb952138ea485f7d",
+        version = "0.22.2",
+        sha256 = "b85f48fa105c4403326e9525ad2b2cc437babaa6e15a3fc0b1dbab0ab064bc7c",
         urls = ["https://github.com/bazelbuild/bazel-gazelle/releases/download/v{version}/bazel-gazelle-v{version}.tar.gz"],
-        last_updated = "2020-05-28",
+        release_date = "2020-10-02",
         use_category = ["build"],
     ),
     bazel_toolchains = dict(
         project_name = "bazel-toolchains",
         project_desc = "Bazel toolchain configs for RBE",
         project_url = "https://github.com/bazelbuild/bazel-toolchains",
-        version = "3.4.1",
-        sha256 = "7ebb200ed3ca3d1f7505659c7dfed01c4b5cb04c3a6f34140726fe22f5d35e86",
+        version = "3.7.2",
+        sha256 = "1caf8584434d3e31be674067996be787cfa511fda2a0f05811131b588886477f",
         strip_prefix = "bazel-toolchains-{version}",
         urls = [
             "https://github.com/bazelbuild/bazel-toolchains/releases/download/{version}/bazel-toolchains-{version}.tar.gz",
             "https://mirror.bazel.build/github.com/bazelbuild/bazel-toolchains/archive/{version}.tar.gz",
         ],
-        last_updated = "2020-08-10",
+        release_date = "2021-01-07",
         use_category = ["build"],
     ),
     build_bazel_rules_apple = dict(
@@ -88,36 +42,52 @@ DEPENDENCY_REPOSITORIES_SPEC = dict(
         version = "0.19.0",
         sha256 = "7a7afdd4869bb201c9352eed2daf37294d42b093579b70423490c1b4d4f6ce42",
         urls = ["https://github.com/bazelbuild/rules_apple/releases/download/{version}/rules_apple.{version}.tar.gz"],
-        last_updated = "2020-10-10",
+        release_date = "2019-10-10",
         use_category = ["build"],
+    ),
+    rules_fuzzing = dict(
+        project_name = "Fuzzing Rules for Bazel",
+        project_desc = "Bazel rules for fuzz tests",
+        project_url = "https://github.com/bazelbuild/rules_fuzzing",
+        version = "0.1.3",
+        sha256 = "ce99c277c4e9e21f77222757936bf7ffb8823911497db84bdd57a796588fcf01",
+        strip_prefix = "rules_fuzzing-{version}",
+        urls = ["https://github.com/bazelbuild/rules_fuzzing/archive/v{version}.tar.gz"],
+        release_date = "2021-04-01",
+        use_category = ["test_only"],
+        implied_untracked_deps = [
+            # This is a repository rule generated to define an OSS-Fuzz fuzzing
+            # engine target from the CFLAGS/CXXFLAGS environment.
+            "rules_fuzzing_oss_fuzz",
+        ],
     ),
     envoy_build_tools = dict(
         project_name = "envoy-build-tools",
         project_desc = "Common build tools shared by the Envoy/UDPA ecosystem",
         project_url = "https://github.com/envoyproxy/envoy-build-tools",
-        version = "0ba5aa98a6e6c5efcc63f53602f69548d2417683",
-        sha256 = "dc3881d16e7b0c855a7279f5757d55e4aa55fe2befbd9e34215b971818622f9e",
+        version = "d36336060aa1ade024654dec009adc4a19e3efd6",
+        sha256 = "7b379e69eafb883cebb52a5ed11b1a12710dd77a33de79c0bc207f6458a5f712",
         strip_prefix = "envoy-build-tools-{version}",
         urls = ["https://github.com/envoyproxy/envoy-build-tools/archive/{version}.tar.gz"],
-        last_updated = "2020-10-01",
+        release_date = "2021-01-28",
         use_category = ["build"],
     ),
     boringssl = dict(
         project_name = "BoringSSL",
         project_desc = "Minimal OpenSSL fork",
         project_url = "https://github.com/google/boringssl",
-        version = "597b810379e126ae05d32c1d94b1a9464385acd0",
-        sha256 = "1ea42456c020daf0a9b0f9e8d8bc3a403c9314f4f54230c617257af996cd5fa6",
-        strip_prefix = "boringssl-{version}",
         # To update BoringSSL, which tracks Chromium releases:
         # 1. Open https://omahaproxy.appspot.com/ and note <current_version> of linux/stable release.
         # 2. Open https://chromium.googlesource.com/chromium/src/+/refs/tags/<current_version>/DEPS and note <boringssl_revision>.
         # 3. Find a commit in BoringSSL's "master-with-bazel" branch that merges <boringssl_revision>.
         #
-        # chromium-85.0.4183.83
+        # chromium-90.0.4395.0(linux/dev)
+        version = "b049eae83d25977661556dcd913b35fbafb3a93a",
+        sha256 = "d78f7b11b8665feea1b6def8e6f235ad8671db8de950f5429f1bf2b3503b3894",
+        strip_prefix = "boringssl-{version}",
         urls = ["https://github.com/google/boringssl/archive/{version}.tar.gz"],
         use_category = ["controlplane", "dataplane_core"],
-        last_updated = "2020-06-23",
+        release_date = "2021-01-25",
         cpe = "cpe:2.3:a:google:boringssl:*",
     ),
     boringssl_fips = dict(
@@ -128,31 +98,31 @@ DEPENDENCY_REPOSITORIES_SPEC = dict(
         sha256 = "3b5fdf23274d4179c2077b5e8fa625d9debd7a390aac1d165b7e47234f648bb8",
         urls = ["https://commondatastorage.googleapis.com/chromium-boringssl-fips/boringssl-ae223d6138807a13006342edfeef32e813246b39.tar.xz"],
         use_category = ["controlplane", "dataplane_core"],
-        last_updated = "2019-08-08",
+        release_date = "2019-08-08",
         cpe = "cpe:2.3:a:google:boringssl:*",
     ),
     com_google_absl = dict(
         project_name = "Abseil",
         project_desc = "Open source collection of C++ libraries drawn from the most fundamental pieces of Google’s internal codebase",
         project_url = "https://abseil.io/",
-        version = "093cc27604df1c4a179b73bc3f00d4d1ce2ce113",
-        sha256 = "55d33c75aff05a8c4a55bdf0eddad66c71a963107bc2add96cf8eb88ddb47a80",
+        version = "5d8fc9192245f0ea67094af57399d7931d6bd53f",
+        sha256 = "e3812f256dd7347a33bf9d93a950cf356c61c0596842ff07d8154cd415145d83",
         strip_prefix = "abseil-cpp-{version}",
         urls = ["https://github.com/abseil/abseil-cpp/archive/{version}.tar.gz"],
         use_category = ["dataplane_core", "controlplane"],
-        last_updated = "2020-10-01",
+        release_date = "2020-11-24",
         cpe = "N/A",
     ),
     com_github_c_ares_c_ares = dict(
         project_name = "c-ares",
         project_desc = "C library for asynchronous DNS requests",
         project_url = "https://c-ares.haxx.se/",
-        version = "1.16.1",
-        sha256 = "d08312d0ecc3bd48eee0a4cc0d2137c9f194e0a28de2028928c0f6cae85f86ce",
+        version = "1.17.1",
+        sha256 = "d73dd0f6de824afd407ce10750ea081af47eba52b8a6cb307d220131ad93fc40",
         strip_prefix = "c-ares-{version}",
         urls = ["https://github.com/c-ares/c-ares/releases/download/cares-{underscore_version}/c-ares-{version}.tar.gz"],
         use_category = ["dataplane_core", "controlplane"],
-        last_updated = "2020-05-11",
+        release_date = "2020-11-19",
         cpe = "cpe:2.3:a:c-ares_project:c-ares:*",
     ),
     com_github_circonus_labs_libcircllhist = dict(
@@ -164,7 +134,7 @@ DEPENDENCY_REPOSITORIES_SPEC = dict(
         strip_prefix = "libcircllhist-{version}",
         urls = ["https://github.com/circonus-labs/libcircllhist/archive/{version}.tar.gz"],
         use_category = ["controlplane", "observability_core", "dataplane_core"],
-        last_updated = "2019-02-11",
+        release_date = "2019-02-11",
         cpe = "N/A",
     ),
     com_github_cyan4973_xxhash = dict(
@@ -176,7 +146,7 @@ DEPENDENCY_REPOSITORIES_SPEC = dict(
         strip_prefix = "xxHash-{version}",
         urls = ["https://github.com/Cyan4973/xxHash/archive/v{version}.tar.gz"],
         use_category = ["dataplane_core", "controlplane"],
-        last_updated = "2020-03-04",
+        release_date = "2020-03-05",
         cpe = "N/A",
     ),
     com_github_envoyproxy_sqlparser = dict(
@@ -192,7 +162,7 @@ DEPENDENCY_REPOSITORIES_SPEC = dict(
             "envoy.filters.network.mysql_proxy",
             "envoy.filters.network.postgres_proxy",
         ],
-        last_updated = "2020-06-10",
+        release_date = "2020-06-10",
         cpe = "N/A",
     ),
     com_github_mirror_tclap = dict(
@@ -203,7 +173,7 @@ DEPENDENCY_REPOSITORIES_SPEC = dict(
         sha256 = "f0ede0721dddbb5eba3a47385a6e8681b14f155e1129dd39d1a959411935098f",
         strip_prefix = "tclap-tclap-{version}-release-final",
         urls = ["https://github.com/mirror/tclap/archive/tclap-{version}-release-final.tar.gz"],
-        last_updated = "2017-11-10",
+        release_date = "2011-04-16",
         use_category = ["other"],
     ),
     com_github_fmtlib_fmt = dict(
@@ -215,7 +185,7 @@ DEPENDENCY_REPOSITORIES_SPEC = dict(
         strip_prefix = "fmt-{version}",
         urls = ["https://github.com/fmtlib/fmt/releases/download/{version}/fmt-{version}.zip"],
         use_category = ["dataplane_core", "controlplane"],
-        last_updated = "2020-08-07",
+        release_date = "2020-08-06",
         cpe = "cpe:2.3:a:fmt:fmt:*",
     ),
     com_github_gabime_spdlog = dict(
@@ -227,30 +197,30 @@ DEPENDENCY_REPOSITORIES_SPEC = dict(
         strip_prefix = "spdlog-{version}",
         urls = ["https://github.com/gabime/spdlog/archive/v{version}.tar.gz"],
         use_category = ["dataplane_core", "controlplane"],
-        last_updated = "2020-07-09",
+        release_date = "2020-07-09",
         cpe = "N/A",
     ),
     com_github_google_libprotobuf_mutator = dict(
         project_name = "libprotobuf-mutator",
         project_desc = "Library to randomly mutate protobuffers",
         project_url = "https://github.com/google/libprotobuf-mutator",
-        version = "8942a9ba43d8bb196230c321d46d6a137957a719",
-        sha256 = "49a26dbe77c75f2eca1dd8a9fbdb31c4496d9af42df027ff57569c5a7a5d980d",
+        version = "1.0",
+        sha256 = "792f250fb546bde8590e72d64311ea00a70c175fd77df6bb5e02328fa15fe28e",
         strip_prefix = "libprotobuf-mutator-{version}",
-        urls = ["https://github.com/google/libprotobuf-mutator/archive/{version}.tar.gz"],
-        last_updated = "2020-08-18",
+        urls = ["https://github.com/google/libprotobuf-mutator/archive/v{version}.tar.gz"],
+        release_date = "2020-11-06",
         use_category = ["test_only"],
     ),
     com_github_google_tcmalloc = dict(
         project_name = "tcmalloc",
         project_desc = "Fast, multi-threaded malloc implementation",
         project_url = "https://github.com/google/tcmalloc",
-        version = "d1311bf409db47c3441d3de6ea07d768c6551dec",
-        sha256 = "e22444b6544edd81f11c987dd5e482a2e00bbff717badb388779ca57525dad50",
+        version = "9f385356c34d4fc11f76a000b609e2b446c20667",
+        sha256 = "652e48e0b9ef645db04bff8a3d4841c60ce07275f5d98e18e698dc92bd111291",
         strip_prefix = "tcmalloc-{version}",
         urls = ["https://github.com/google/tcmalloc/archive/{version}.tar.gz"],
         use_category = ["dataplane_core", "controlplane"],
-        last_updated = "2020-09-16",
+        release_date = "2020-11-04",
         cpe = "N/A",
     ),
     com_github_gperftools_gperftools = dict(
@@ -261,7 +231,7 @@ DEPENDENCY_REPOSITORIES_SPEC = dict(
         sha256 = "240deacdd628b6459671b83eb0c4db8e97baadf659f25b92e9a078d536bd513e",
         strip_prefix = "gperftools-{version}",
         urls = ["https://github.com/gperftools/gperftools/releases/download/gperftools-{version}/gperftools-{version}.tar.gz"],
-        last_updated = "2020-07-06",
+        release_date = "2020-07-06",
         use_category = ["dataplane_core", "controlplane"],
         cpe = "cpe:2.3:a:gperftools_project:gperftools:*",
     ),
@@ -269,27 +239,27 @@ DEPENDENCY_REPOSITORIES_SPEC = dict(
         project_name = "gRPC",
         project_desc = "gRPC C core library",
         project_url = "https://grpc.io",
-        # TODO(JimmyCYJ): Bump to release 1.27
-        # This sha on grpc:v1.25.x branch is specifically chosen to fix gRPC STS call credential options.
-        version = "d8f4928fa779f6005a7fe55a176bdb373b0f910f",
-        sha256 = "bbc8f020f4e85ec029b047fab939b8c81f3d67254b5c724e1003a2bc49ddd123",
+        version = "1.34.0",
+        sha256 = "7372a881122cd85a7224435a1d58bc5e11c88d4fb98a64b83f36f3d1c2f16d39",
         strip_prefix = "grpc-{version}",
-        urls = ["https://github.com/grpc/grpc/archive/{version}.tar.gz"],
+        urls = ["https://github.com/grpc/grpc/archive/v{version}.tar.gz"],
         use_category = ["dataplane_core", "controlplane"],
-        last_updated = "2020-02-11",
+        release_date = "2020-12-01",
         cpe = "cpe:2.3:a:grpc:grpc:*",
     ),
     com_github_luajit_luajit = dict(
         project_name = "LuaJIT",
         project_desc = "Just-In-Time compiler for Lua",
         project_url = "https://luajit.org",
-        version = "2.1.0-beta3",
-        sha256 = "409f7fe570d3c16558e594421c47bdd130238323c9d6fd6c83dedd2aaeb082a8",
+        # The last release version, 2.1.0-beta3 has a number of CVEs filed
+        # against it. These may not impact correct non-malicious Lua code, but for prudence we bump.
+        version = "1d8b747c161db457e032a023ebbff511f5de5ec2",
+        sha256 = "20a159c38a98ecdb6368e8d655343b6036622a29a1621da9dc303f7ed9bf37f3",
         strip_prefix = "LuaJIT-{version}",
-        urls = ["https://github.com/LuaJIT/LuaJIT/archive/v{version}.tar.gz"],
+        urls = ["https://github.com/LuaJIT/LuaJIT/archive/{version}.tar.gz"],
+        release_date = "2020-10-12",
         use_category = ["dataplane_ext"],
         extensions = ["envoy.filters.http.lua"],
-        last_updated = "2017-11-07",
         cpe = "cpe:2.3:a:luajit:luajit:*",
     ),
     com_github_moonjit_moonjit = dict(
@@ -302,19 +272,19 @@ DEPENDENCY_REPOSITORIES_SPEC = dict(
         urls = ["https://github.com/moonjit/moonjit/archive/{version}.tar.gz"],
         use_category = ["dataplane_ext"],
         extensions = ["envoy.filters.http.lua"],
-        last_updated = "2020-01-14",
+        release_date = "2020-01-14",
         cpe = "cpe:2.3:a:moonjit_project:moonjit:*",
     ),
     com_github_nghttp2_nghttp2 = dict(
         project_name = "Nghttp2",
         project_desc = "Implementation of HTTP/2 and its header compression algorithm HPACK in Cimplementation of HTTP/2 and its header compression algorithm HPACK in C",
         project_url = "https://nghttp2.org",
-        version = "1.41.0",
-        sha256 = "eacc6f0f8543583ecd659faf0a3f906ed03826f1d4157b536b4b385fe47c5bb8",
+        version = "1.42.0",
+        sha256 = "884d18a0158908125d58b1b61d475c0325e5a004e3d61a56b5fcc55d5f4b7af5",
         strip_prefix = "nghttp2-{version}",
         urls = ["https://github.com/nghttp2/nghttp2/releases/download/v{version}/nghttp2-{version}.tar.gz"],
         use_category = ["controlplane", "dataplane_core"],
-        last_updated = "2020-06-02",
+        release_date = "2020-11-23",
         cpe = "cpe:2.3:a:nghttp2:nghttp2:*",
     ),
     io_opentracing_cpp = dict(
@@ -331,7 +301,7 @@ DEPENDENCY_REPOSITORIES_SPEC = dict(
             "envoy.tracers.dynamic_ot",
             "envoy.tracers.lightstep",
         ],
-        last_updated = "2019-01-16",
+        release_date = "2019-01-16",
         cpe = "N/A",
     ),
     com_lightstep_tracer_cpp = dict(
@@ -344,20 +314,47 @@ DEPENDENCY_REPOSITORIES_SPEC = dict(
         urls = ["https://github.com/lightstep/lightstep-tracer-cpp/archive/{version}.tar.gz"],
         use_category = ["observability_ext"],
         extensions = ["envoy.tracers.lightstep"],
-        last_updated = "2020-08-24",
+        release_date = "2020-08-25",
+        cpe = "N/A",
+    ),
+    skywalking_data_collect_protocol = dict(
+        project_name = "skywalking-data-collect-protocol",
+        project_desc = "Data Collect Protocols of Apache SkyWalking",
+        project_url = "https://github.com/apache/skywalking-data-collect-protocol",
+        name = "skywalking_data_collect_protocol",
+        sha256 = "fa9ac679624217f30b6e8d5c450365386c610e2d08188a20f0340c3b14401833",
+        urls = ["https://github.com/apache/skywalking-data-collect-protocol/archive/v8.3.0.zip"],
+        strip_prefix = "skywalking-data-collect-protocol-8.3.0",
+        version = "8.3.0",
+        use_category = ["observability_ext"],
+        extensions = ["envoy.tracers.skywalking"],
+        release_date = "2020-11-20",
+        cpe = "N/A",
+    ),
+    com_github_skyapm_cpp2sky = dict(
+        project_name = "cpp2sky",
+        project_desc = "C++ SDK for Apache SkyWalking",
+        project_url = "https://github.com/SkyAPM/cpp2sky",
+        sha256 = "a8d870bb4b1c4a05eae319f689d1948927f3f0a5b5fe524db73a4c04121a339a",
+        version = "0.1.1",
+        strip_prefix = "cpp2sky-{version}",
+        urls = ["https://github.com/SkyAPM/cpp2sky/archive/v{version}.tar.gz"],
+        use_category = ["observability_ext"],
+        extensions = ["envoy.tracers.skywalking"],
+        release_date = "2021-01-15",
         cpe = "N/A",
     ),
     com_github_datadog_dd_opentracing_cpp = dict(
         project_name = "Datadog OpenTracing C++ Client",
         project_desc = "Datadog OpenTracing C++ Client",
         project_url = "https://github.com/DataDog/dd-opentracing-cpp",
-        version = "1.1.5",
-        sha256 = "b84fd2fb0bb0578af4901db31d1c0ae909b532a1016fe6534cbe31a6c3ad6924",
+        version = "1.2.1",
+        sha256 = "ae44699e4aa2d21b70ed897a6c0cf3ed7dfb411e1aae4e686e39af75cec7c9bf",
         strip_prefix = "dd-opentracing-cpp-{version}",
         urls = ["https://github.com/DataDog/dd-opentracing-cpp/archive/v{version}.tar.gz"],
         use_category = ["observability_ext"],
         extensions = ["envoy.tracers.datadog"],
-        last_updated = "2020-05-15",
+        release_date = "2021-01-26",
         cpe = "N/A",
     ),
     com_github_google_benchmark = dict(
@@ -369,7 +366,7 @@ DEPENDENCY_REPOSITORIES_SPEC = dict(
         strip_prefix = "benchmark-{version}",
         urls = ["https://github.com/google/benchmark/archive/v{version}.tar.gz"],
         use_category = ["test_only"],
-        last_updated = "2020-06-09",
+        release_date = "2020-06-09",
     ),
     com_github_libevent_libevent = dict(
         project_name = "libevent",
@@ -390,7 +387,7 @@ DEPENDENCY_REPOSITORIES_SPEC = dict(
         strip_prefix = "libevent-{version}",
         urls = ["https://github.com/libevent/libevent/archive/{version}.tar.gz"],
         use_category = ["dataplane_core", "controlplane"],
-        last_updated = "2020-07-31",
+        release_date = "2020-07-28",
         cpe = "cpe:2.3:a:libevent_project:libevent:*",
     ),
     # This should be removed, see https://github.com/envoyproxy/envoy/issues/13261.
@@ -406,19 +403,37 @@ DEPENDENCY_REPOSITORIES_SPEC = dict(
         strip_prefix = "zlib-{version}",
         urls = ["https://github.com/madler/zlib/archive/{version}.tar.gz"],
         use_category = ["controlplane", "dataplane_core"],
-        last_updated = "2019-04-14",
+        release_date = "2019-04-14",
         cpe = "cpe:2.3:a:gnu:zlib:*",
+    ),
+    org_brotli = dict(
+        project_name = "brotli",
+        project_desc = "brotli compression library",
+        project_url = "https://brotli.org",
+        # Use the dev branch of brotli to resolve compilation issues.
+        # TODO(rojkov): Remove when brotli > 1.0.9 is released.
+        version = "0cd2e3926e95e7e2930f57ae3f4885508d462a25",
+        sha256 = "93810780e60304b51f2c9645fe313a6e4640711063ed0b860cfa60999dd256c5",
+        strip_prefix = "brotli-{version}",
+        urls = ["https://github.com/google/brotli/archive/{version}.tar.gz"],
+        use_category = ["dataplane_ext"],
+        extensions = [
+            "envoy.compression.brotli.compressor",
+            "envoy.compression.brotli.decompressor",
+        ],
+        release_date = "2020-09-08",
+        cpe = "cpe:2.3:a:google:brotli:*",
     ),
     com_github_zlib_ng_zlib_ng = dict(
         project_name = "zlib-ng",
         project_desc = "zlib fork (higher performance)",
         project_url = "https://github.com/zlib-ng/zlib-ng",
-        version = "193d8fd7dfb7927facab7a3034daa27ad5b9df1c",
-        sha256 = "5fe543e8d007b9e7b729f3d6b3a5ee1f9b68d0eef5f6af1393745a4dcd472a98",
+        version = "b802a303ce8b6c86fbe3f93d59e0a82333768c0c",
+        sha256 = "e051eade607ecbbfa2c7ed3087fe53e5d3a58325375e1e28209594138e4aa93d",
         strip_prefix = "zlib-ng-{version}",
         urls = ["https://github.com/zlib-ng/zlib-ng/archive/{version}.tar.gz"],
         use_category = ["controlplane", "dataplane_core"],
-        last_updated = "2020-08-16",
+        release_date = "2020-10-18",
         cpe = "N/A",
     ),
     com_github_jbeder_yaml_cpp = dict(
@@ -432,7 +447,7 @@ DEPENDENCY_REPOSITORIES_SPEC = dict(
         # YAML is also used for runtime as well as controlplane. It shouldn't appear on the
         # dataplane but we can't verify this automatically due to code structure today.
         use_category = ["controlplane", "dataplane_core"],
-        last_updated = "2020-07-28",
+        release_date = "2020-07-27",
         cpe = "cpe:2.3:a:yaml-cpp_project:yaml-cpp:*",
     ),
     com_github_msgpack_msgpack_c = dict(
@@ -445,20 +460,20 @@ DEPENDENCY_REPOSITORIES_SPEC = dict(
         urls = ["https://github.com/msgpack/msgpack-c/releases/download/cpp-{version}/msgpack-{version}.tar.gz"],
         use_category = ["observability_ext"],
         extensions = ["envoy.tracers.datadog"],
-        last_updated = "2020-06-05",
+        release_date = "2020-06-05",
         cpe = "N/A",
     ),
     com_github_google_jwt_verify = dict(
         project_name = "jwt_verify_lib",
         project_desc = "JWT verification library for C++",
         project_url = "https://github.com/google/jwt_verify_lib",
-        version = "7276a339af8426724b744216f619c99152f8c141",
-        sha256 = "f1fde4f3ebb3b2d841332c7a02a4b50e0529a19709934c63bc6208d1bbe28fb1",
+        version = "28efec2e4df1072db0ed03597591360ec9f80aac",
+        sha256 = "7a5c35b7cbf633398503ae12cad8c2833e92b3a796eed68b6256d22d51ace5e1",
         strip_prefix = "jwt_verify_lib-{version}",
         urls = ["https://github.com/google/jwt_verify_lib/archive/{version}.tar.gz"],
         use_category = ["dataplane_ext"],
         extensions = ["envoy.filters.http.jwt_authn"],
-        last_updated = "2020-07-09",
+        release_date = "2020-11-05",
         cpe = "N/A",
     ),
     com_github_nodejs_http_parser = dict(
@@ -472,8 +487,21 @@ DEPENDENCY_REPOSITORIES_SPEC = dict(
         strip_prefix = "http-parser-{version}",
         urls = ["https://github.com/nodejs/http-parser/archive/{version}.tar.gz"],
         use_category = ["controlplane", "dataplane_core"],
-        last_updated = "2020-07-10",
+        release_date = "2020-07-10",
         cpe = "cpe:2.3:a:nodejs:node.js:*",
+    ),
+    com_github_alibaba_hessian2_codec = dict(
+        project_name = "hessian2-codec",
+        project_desc = "hessian2-codec is a C++ library for hessian2 codec",
+        project_url = "https://github.com/alibaba/hessian2-codec.git",
+        version = "dd8e05487a27b367b90ce81f4e6e6f62d693a212",
+        sha256 = "93260c54406e11b7be078a7ea120f7ab0df475c733e68d010fde400c5c8c8162",
+        strip_prefix = "hessian2-codec-{version}",
+        urls = ["https://github.com/alibaba/hessian2-codec/archive/{version}.tar.gz"],
+        use_category = ["dataplane_ext"],
+        extensions = ["envoy.filters.network.dubbo_proxy"],
+        release_date = "2021-04-05",
+        cpe = "N/A",
     ),
     com_github_tencent_rapidjson = dict(
         project_name = "RapidJSON",
@@ -486,8 +514,39 @@ DEPENDENCY_REPOSITORIES_SPEC = dict(
         # We're mostly using com_google_protobuf for JSON, but there are some extensions and hard to
         # disentangle uses on the dataplane, e.g. header_formatter, Squash filter.
         use_category = ["controlplane", "dataplane_core"],
-        last_updated = "2019-12-02",
+        release_date = "2019-12-03",
         cpe = "cpe:2.3:a:tencent:rapidjson:*",
+    ),
+    com_github_nlohmann_json = dict(
+        project_name = "nlohmann JSON",
+        project_desc = "Fast JSON parser/generator for C++",
+        project_url = "https://nlohmann.github.io/json",
+        version = "3.9.1",
+        sha256 = "4cf0df69731494668bdd6460ed8cb269b68de9c19ad8c27abc24cd72605b2d5b",
+        strip_prefix = "json-{version}",
+        urls = ["https://github.com/nlohmann/json/archive/v{version}.tar.gz"],
+        # This will be a replacement for rapidJSON used in extensions and may also be a fast
+        # replacement for protobuf JSON.
+        use_category = ["controlplane", "dataplane_core"],
+        release_date = "2020-08-06",
+        cpe = "cpe:2.3:a:json_project:json:*",
+    ),
+    # This is an external dependency needed while running the
+    # envoy docker image. A bazel target has been created since
+    # there is no binary package available for the utility on Ubuntu
+    # which is the base image used to build an envoy container.
+    # This is not needed to build an envoy binary or run tests.
+    com_github_ncopa_suexec = dict(
+        project_name = "su-exec",
+        project_desc = "Utility to switch user and group id, setgroups and exec",
+        project_url = "https://github.com/ncopa/su-exec",
+        version = "212b75144bbc06722fbd7661f651390dc47a43d1",
+        sha256 = "939782774079ec156788ea3e04dd5e340e993544f4296be76a9c595334ca1779",
+        strip_prefix = "su-exec-{version}",
+        urls = ["https://github.com/ncopa/su-exec/archive/{version}.tar.gz"],
+        use_category = ["other"],
+        release_date = "2019-09-18",
+        cpe = "N/A",
     ),
     com_github_twitter_common_lang = dict(
         project_name = "twitter.common.lang (Thrift)",
@@ -497,7 +556,7 @@ DEPENDENCY_REPOSITORIES_SPEC = dict(
         sha256 = "56d1d266fd4767941d11c27061a57bc1266a3342e551bde3780f9e9eb5ad0ed1",
         strip_prefix = "twitter.common.lang-{version}/src",
         urls = ["https://files.pythonhosted.org/packages/08/bc/d6409a813a9dccd4920a6262eb6e5889e90381453a5f58938ba4cf1d9420/twitter.common.lang-{version}.tar.gz"],
-        last_updated = "2018-06-26",
+        release_date = "2016-10-17",
         use_category = ["test_only"],
     ),
     com_github_twitter_common_rpc = dict(
@@ -508,7 +567,7 @@ DEPENDENCY_REPOSITORIES_SPEC = dict(
         sha256 = "0792b63fb2fb32d970c2e9a409d3d00633190a22eb185145fe3d9067fdaa4514",
         strip_prefix = "twitter.common.rpc-{version}/src",
         urls = ["https://files.pythonhosted.org/packages/be/97/f5f701b703d0f25fbf148992cd58d55b4d08d3db785aad209255ee67e2d0/twitter.common.rpc-{version}.tar.gz"],
-        last_updated = "2018-06-26",
+        release_date = "2016-10-17",
         use_category = ["test_only"],
     ),
     com_github_twitter_common_finagle_thrift = dict(
@@ -519,7 +578,7 @@ DEPENDENCY_REPOSITORIES_SPEC = dict(
         sha256 = "1e3a57d11f94f58745e6b83348ecd4fa74194618704f45444a15bc391fde497a",
         strip_prefix = "twitter.common.finagle-thrift-{version}/src",
         urls = ["https://files.pythonhosted.org/packages/f9/e7/4f80d582578f8489226370762d2cf6bc9381175d1929eba1754e03f70708/twitter.common.finagle-thrift-{version}.tar.gz"],
-        last_updated = "2018-06-26",
+        release_date = "2016-10-17",
         use_category = ["test_only"],
     ),
     com_google_googletest = dict(
@@ -532,77 +591,81 @@ DEPENDENCY_REPOSITORIES_SPEC = dict(
         sha256 = "7897bfaa5ad39a479177cfb5c3ce010184dbaee22a7c3727b212282871918751",
         strip_prefix = "googletest-{version}",
         urls = ["https://github.com/google/googletest/archive/{version}.tar.gz"],
-        last_updated = "2020-09-10",
+        release_date = "2020-09-10",
         use_category = ["test_only"],
     ),
     com_google_protobuf = dict(
         project_name = "Protocol Buffers",
         project_desc = "Language-neutral, platform-neutral extensible mechanism for serializing structured data",
         project_url = "https://developers.google.com/protocol-buffers",
-        version = "3.10.1",
-        sha256 = "d7cfd31620a352b2ee8c1ed883222a0d77e44346643458e062e86b1d069ace3e",
+        version = "3.14.0",
+        sha256 = "6dd0f6b20094910fbb7f1f7908688df01af2d4f6c5c21331b9f636048674aebf",
         strip_prefix = "protobuf-{version}",
         urls = ["https://github.com/protocolbuffers/protobuf/releases/download/v{version}/protobuf-all-{version}.tar.gz"],
         use_category = ["dataplane_core", "controlplane"],
-        last_updated = "2020-10-24",
+        release_date = "2020-11-13",
         cpe = "cpe:2.3:a:google:protobuf:*",
     ),
     grpc_httpjson_transcoding = dict(
         project_name = "grpc-httpjson-transcoding",
         project_desc = "Library that supports transcoding so that HTTP/JSON can be converted to gRPC",
         project_url = "https://github.com/grpc-ecosystem/grpc-httpjson-transcoding",
-        version = "faf8af1e9788cd4385b94c8f85edab5ea5d4b2d6",
-        sha256 = "62c8cb5ea2cca1142cde9d4a0778c52c6022345c3268c60ef81666946b958ad5",
+        version = "909368951e9a447098f87e41bc49e37810af99f5",
+        sha256 = "4be3d92add3e3fad56d09a68b6f3f18367b086a3442275e046e84b3c2bb94d43",
         strip_prefix = "grpc-httpjson-transcoding-{version}",
         urls = ["https://github.com/grpc-ecosystem/grpc-httpjson-transcoding/archive/{version}.tar.gz"],
         use_category = ["dataplane_ext"],
         extensions = ["envoy.filters.http.grpc_json_transcoder"],
-        last_updated = "2020-03-02",
+        release_date = "2021-02-24",
         cpe = "N/A",
     ),
     io_bazel_rules_go = dict(
         project_name = "Go rules for Bazel",
         project_desc = "Bazel rules for the Go language",
         project_url = "https://github.com/bazelbuild/rules_go",
-        version = "0.23.7",
-        sha256 = "0310e837aed522875791750de44408ec91046c630374990edd51827cb169f616",
+        version = "0.25.0",
+        sha256 = "6f111c57fd50baf5b8ee9d63024874dd2a014b069426156c55adbf6d3d22cb7b",
         urls = ["https://github.com/bazelbuild/rules_go/releases/download/v{version}/rules_go-v{version}.tar.gz"],
-        use_category = ["build"],
-        last_updated = "2020-08-06",
+        use_category = ["build", "api"],
+        release_date = "2020-12-02",
+        implied_untracked_deps = [
+            "com_github_golang_protobuf",
+            "io_bazel_rules_nogo",
+            "org_golang_google_protobuf",
+            "org_golang_x_tools",
+        ],
     ),
     rules_cc = dict(
         project_name = "C++ rules for Bazel",
         project_desc = "Bazel rules for the C++ language",
         project_url = "https://github.com/bazelbuild/rules_cc",
         # TODO(lizan): pin to a point releases when there's a released version.
-        version = "818289e5613731ae410efb54218a4077fb9dbb03",
-        sha256 = "9d48151ea71b3e225adfb6867e6d2c7d0dce46cbdc8710d9a9a628574dfd40a0",
+        version = "b1c40e1de81913a3c40e5948f78719c28152486d",
+        sha256 = "71d037168733f26d2a9648ad066ee8da4a34a13f51d24843a42efa6b65c2420f",
         strip_prefix = "rules_cc-{version}",
         urls = ["https://github.com/bazelbuild/rules_cc/archive/{version}.tar.gz"],
-        last_updated = "2020-05-13",
+        release_date = "2020-11-11",
         use_category = ["build"],
     ),
     rules_foreign_cc = dict(
         project_name = "Rules for using foreign build systems in Bazel",
         project_desc = "Rules for using foreign build systems in Bazel",
         project_url = "https://github.com/bazelbuild/rules_foreign_cc",
-        version = "594bf4d7731e606a705f3ad787dd0a70c5a28b30",
-        sha256 = "2b1cf88de0b6e0195f6571cfde3a5bd406d11b42117d6adef2395c9525a1902e",
+        version = "d54c78ab86b40770ee19f0949db9d74a831ab9f0",
+        sha256 = "e7446144277c9578141821fc91c55a61df7ae01bda890902f7286f5fd2f6ae46",
         strip_prefix = "rules_foreign_cc-{version}",
         urls = ["https://github.com/bazelbuild/rules_foreign_cc/archive/{version}.tar.gz"],
-        last_updated = "2020-08-21",
+        release_date = "2020-10-26",
         use_category = ["build"],
     ),
     rules_python = dict(
         project_name = "Python rules for Bazel",
         project_desc = "Bazel rules for the Python language",
         project_url = "https://github.com/bazelbuild/rules_python",
-        # TODO(htuch): revert back to a point releases when pip3_import appears.
-        version = "a0fbf98d4e3a232144df4d0d80b577c7a693b570",
-        sha256 = "76a8fd4e7eca2a3590f816958faa0d83c9b2ce9c32634c5c375bcccf161d3bb5",
-        strip_prefix = "rules_python-{version}",
-        urls = ["https://github.com/bazelbuild/rules_python/archive/{version}.tar.gz"],
-        last_updated = "2020-04-09",
+        version = "0.1.0",
+        sha256 = "b6d46438523a3ec0f3cead544190ee13223a52f6a6765a29eae7b7cc24cc83a0",
+        release_date = "2020-10-15",
+        urls = ["https://github.com/bazelbuild/rules_python/releases/download/{version}/rules_python-{version}.tar.gz"],
         use_category = ["build"],
     ),
     six = dict(
@@ -612,58 +675,74 @@ DEPENDENCY_REPOSITORIES_SPEC = dict(
         version = "1.12.0",
         sha256 = "d16a0141ec1a18405cd4ce8b4613101da75da0e9a7aec5bdd4fa804d0e0eba73",
         urls = ["https://files.pythonhosted.org/packages/dd/bf/4138e7bfb757de47d1f4b6994648ec67a51efe58fa907c1e11e350cddfca/six-{version}.tar.gz"],
-        last_updated = "2019-11-17",
+        release_date = "2018-12-09",
         use_category = ["other"],
     ),
     org_llvm_llvm = dict(
         project_name = "LLVM",
         project_desc = "LLVM Compiler Infrastructure",
         project_url = "https://llvm.org",
-        version = "10.0",
+        version = "10.0.0",
         sha256 = "df83a44b3a9a71029049ec101fb0077ecbbdf5fe41e395215025779099a98fdf",
-        strip_prefix = "llvm-{version}.0.src",
-        urls = ["https://github.com/llvm/llvm-project/releases/download/llvmorg-{version}.0/llvm-{version}.0.src.tar.xz"],
-        last_updated = "2020-03-24",
+        strip_prefix = "llvm-{version}.src",
+        urls = ["https://github.com/llvm/llvm-project/releases/download/llvmorg-{version}/llvm-{version}.src.tar.xz"],
+        release_date = "2020-03-23",
         use_category = ["dataplane_ext"],
-        extensions = [
-            "envoy.access_loggers.wasm",
-            "envoy.bootstrap.wasm",
-            "envoy.filters.http.wasm",
-            "envoy.filters.network.wasm",
-            "envoy.stat_sinks.wasm",
-        ],
-        cpe = "N/A",
+        extensions = ["envoy.wasm.runtime.wavm"],
+        cpe = "cpe:2.3:a:llvm:*:*",
     ),
     com_github_wavm_wavm = dict(
         project_name = "WAVM",
         project_desc = "WebAssembly Virtual Machine",
         project_url = "https://wavm.github.io",
-        version = "e8155f1f3af88b4d08802716a7054950ef18d827",
-        sha256 = "cc3fcaf05d57010c9cf8eb920234679dede6c780137b55001fd34e4d14806f7c",
+        version = "79c3aa29366615d9b1593cd527e5b4b94cc6072a",
+        sha256 = "ce899269516313b400005a8cc9bc3bcd8329663f43f7b4baae211ea0cd456a39",
         strip_prefix = "WAVM-{version}",
         urls = ["https://github.com/WAVM/WAVM/archive/{version}.tar.gz"],
-        last_updated = "2020-07-06",
+        release_date = "2021-03-31",
         use_category = ["dataplane_ext"],
-        extensions = [
-            "envoy.access_loggers.wasm",
-            "envoy.bootstrap.wasm",
-            "envoy.filters.http.wasm",
-            "envoy.filters.network.wasm",
-            "envoy.stat_sinks.wasm",
-        ],
+        extensions = ["envoy.wasm.runtime.wavm"],
+        cpe = "cpe:2.3:a:webassembly_virtual_machine_project:webassembly_virtual_machine:*",
+    ),
+    com_github_wasmtime = dict(
+        project_name = "wasmtime",
+        project_desc = "A standalone runtime for WebAssembly",
+        project_url = "https://github.com/bytecodealliance/wasmtime",
+        version = "0.26.0",
+        sha256 = "e95d274822ac72bf06355bdfbeddcacae60d7e98fec8ee4b2e21740636fb5c2c",
+        strip_prefix = "wasmtime-{version}",
+        urls = ["https://github.com/bytecodealliance/wasmtime/archive/v{version}.tar.gz"],
+        release_date = "2021-04-05",
+        use_category = ["dataplane_ext"],
+        extensions = ["envoy.wasm.runtime.wasmtime"],
+        cpe = "N/A",
+    ),
+    com_github_wasm_c_api = dict(
+        project_name = "wasm-c-api",
+        project_desc = "WebAssembly C and C++ API",
+        project_url = "https://github.com/WebAssembly/wasm-c-api",
+        # this is the submodule's specific commit used by wasmtime
+        # https://github.com/bytecodealliance/wasmtime/tree/v0.25.0/crates/c-api
+        version = "c9d31284651b975f05ac27cee0bab1377560b87e",
+        sha256 = "c774044f51431429e878bd1b9e2a4e38932f861f9211df72f75e9427eb6b8d32",
+        strip_prefix = "wasm-c-api-{version}",
+        urls = ["https://github.com/WebAssembly/wasm-c-api/archive/{version}.tar.gz"],
+        release_date = "2021-01-11",
+        use_category = ["dataplane_ext"],
+        extensions = ["envoy.wasm.runtime.wasmtime"],
         cpe = "N/A",
     ),
     io_opencensus_cpp = dict(
         project_name = "OpenCensus C++",
         project_desc = "OpenCensus tracing library",
         project_url = "https://github.com/census-instrumentation/opencensus-cpp",
-        version = "7877337633466358ed680f9b26967da5b310d7aa",
-        sha256 = "12ff300fa804f97bd07e2ff071d969e09d5f3d7bbffeac438c725fa52a51a212",
+        version = "ba631066779a534267fdb1321b19850eb2b0c000",
+        sha256 = "f239a40803f6e2e42b57c9e68771b0990c4ca8b2d76b440073cdf14f4211ad26",
         strip_prefix = "opencensus-cpp-{version}",
         urls = ["https://github.com/census-instrumentation/opencensus-cpp/archive/{version}.tar.gz"],
         use_category = ["observability_ext"],
         extensions = ["envoy.tracers.opencensus"],
-        last_updated = "2020-06-01",
+        release_date = "2020-10-08",
         cpe = "N/A",
     ),
     # This should be removed, see https://github.com/envoyproxy/envoy/issues/11816.
@@ -671,8 +750,8 @@ DEPENDENCY_REPOSITORIES_SPEC = dict(
         project_name = "curl",
         project_desc = "Library for transferring data with URLs",
         project_url = "https://curl.haxx.se",
-        version = "7.72.0",
-        sha256 = "d4d5899a3868fbb6ae1856c3e55a32ce35913de3956d1973caccd37bd0174fa2",
+        version = "7.76.0",
+        sha256 = "3b4378156ba09e224008e81dcce854b7ce4d182b1f9cfb97fe5ed9e9c18c6bd3",
         strip_prefix = "curl-{version}",
         urls = ["https://github.com/curl/curl/releases/download/curl-{underscore_version}/curl-{version}.tar.gz"],
         use_category = ["dataplane_ext", "observability_ext"],
@@ -682,40 +761,33 @@ DEPENDENCY_REPOSITORIES_SPEC = dict(
             "envoy.grpc_credentials.aws_iam",
             "envoy.tracers.opencensus",
         ],
-        last_updated = "2020-08-19",
-        cpe = "cpe:2.3:a:haxx:curl:*",
+        release_date = "2021-03-30",
+        cpe = "cpe:2.3:a:haxx:libcurl:*",
     ),
     com_googlesource_chromium_v8 = dict(
         project_name = "V8",
         project_desc = "Google’s open source high-performance JavaScript and WebAssembly engine, written in C++",
         project_url = "https://v8.dev",
-        version = "8.5.210.20",
+        version = "9.0.257.17",
         # This archive was created using https://storage.googleapis.com/envoyproxy-wee8/wee8-archive.sh
         # and contains complete checkout of V8 with all dependencies necessary to build wee8.
-        sha256 = "ef404643d7da6854b76b9fb9950a79a1acbd037b7a26f02c585ac379b0f7dee1",
+        sha256 = "0eaf060eae4907f7d961fc31b0692175003f56cee320c7e4da4d19b47c2557f3",
         urls = ["https://storage.googleapis.com/envoyproxy-wee8/wee8-{version}.tar.gz"],
         use_category = ["dataplane_ext"],
-        extensions = [
-            "envoy.access_loggers.wasm",
-            "envoy.bootstrap.wasm",
-            "envoy.filters.http.wasm",
-            "envoy.filters.network.wasm",
-            "envoy.stat_sinks.wasm",
-        ],
-        last_updated = "2020-08-31",
+        extensions = ["envoy.wasm.runtime.v8"],
+        release_date = "2021-04-12",
         cpe = "cpe:2.3:a:google:v8:*",
     ),
     com_googlesource_quiche = dict(
         project_name = "QUICHE",
         project_desc = "QUICHE (QUIC, HTTP/2, Etc) is Google‘s implementation of QUIC and related protocols",
         project_url = "https://quiche.googlesource.com/quiche",
-        # Static snapshot of https://quiche.googlesource.com/quiche/+archive/f555d99a084cdd086a349548c70fb558ac5847cf.tar.gz
-        version = "f555d99a084cdd086a349548c70fb558ac5847cf",
-        sha256 = "1833f08e7b0f18b49d7498b029b7f3e6559a82113ec82a98a9e945553756e351",
+        # Static snapshot of https://quiche.googlesource.com/quiche/+archive/88c8d5903d851744410ea9840201b6507feae981.tar.gz
+        version = "88c8d5903d851744410ea9840201b6507feae981",
+        sha256 = "b254fa8f363be0637a468c14c3f57bf7aa2ae23b26a8d388ad0f31cb9863332d",
         urls = ["https://storage.googleapis.com/quiche-envoy-integration/{version}.tar.gz"],
-        use_category = ["dataplane_ext"],
-        extensions = ["envoy.transport_sockets.quic"],
-        last_updated = "2020-09-18",
+        use_category = ["dataplane_core"],
+        release_date = "2021-04-07",
         cpe = "N/A",
     ),
     com_googlesource_googleurl = dict(
@@ -726,30 +798,31 @@ DEPENDENCY_REPOSITORIES_SPEC = dict(
         version = "ef0d23689e240e6c8de4c3a5296b209128c87373",
         sha256 = "d769283fed1319bca68bae8bdd47fbc3a7933999329eee850eff1f1ea61ce176",
         urls = ["https://storage.googleapis.com/quiche-envoy-integration/googleurl_{version}.tar.gz"],
-        use_category = ["dataplane_ext"],
+        use_category = ["controlplane", "dataplane_core"],
         extensions = [],
-        last_updated = "2020-08-05",
+        release_date = "2020-07-30",
         cpe = "N/A",
     ),
     com_google_cel_cpp = dict(
         project_name = "Common Expression Language (CEL) C++ library",
         project_desc = "Common Expression Language (CEL) C++ library",
         project_url = "https://opensource.google/projects/cel",
-        version = "b9453a09b28a1531c4917e8792b3ea61f6b1a447",
-        sha256 = "cad7d01139947d78e413d112cb8f7431fbb33cf66b0adf9c280824803fc2a72e",
+        version = "9841e3ee251f3cc4cd5b6dd9deee6818bc9f2854",
+        sha256 = "7e42cbad7d1068d6e7891ad101e2863e727692136d6b3a817c487b3cc7bcfdcc",
         strip_prefix = "cel-cpp-{version}",
         urls = ["https://github.com/google/cel-cpp/archive/{version}.tar.gz"],
         use_category = ["dataplane_ext"],
         extensions = [
             "envoy.access_loggers.wasm",
             "envoy.bootstrap.wasm",
+            "envoy.rate_limit_descriptors.expr",
             "envoy.filters.http.rbac",
             "envoy.filters.http.wasm",
             "envoy.filters.network.rbac",
             "envoy.filters.network.wasm",
             "envoy.stat_sinks.wasm",
         ],
-        last_updated = "2020-07-14",
+        release_date = "2020-12-17",
         cpe = "N/A",
     ),
     com_github_google_flatbuffers = dict(
@@ -764,11 +837,14 @@ DEPENDENCY_REPOSITORIES_SPEC = dict(
         extensions = [
             "envoy.access_loggers.wasm",
             "envoy.bootstrap.wasm",
+            "envoy.rate_limit_descriptors.expr",
+            "envoy.filters.http.rbac",
             "envoy.filters.http.wasm",
+            "envoy.filters.network.rbac",
             "envoy.filters.network.wasm",
             "envoy.stat_sinks.wasm",
         ],
-        last_updated = "2020-07-29",
+        release_date = "2020-04-02",
         cpe = "N/A",
     ),
     com_googlesource_code_re2 = dict(
@@ -780,7 +856,7 @@ DEPENDENCY_REPOSITORIES_SPEC = dict(
         strip_prefix = "re2-{version}",
         urls = ["https://github.com/google/re2/archive/{version}.tar.gz"],
         use_category = ["controlplane", "dataplane_core"],
-        last_updated = "2020-07-06",
+        release_date = "2020-07-06",
         cpe = "N/A",
     ),
     # Included to access FuzzedDataProvider.h. This is compiler agnostic but
@@ -790,24 +866,24 @@ DEPENDENCY_REPOSITORIES_SPEC = dict(
         project_name = "compiler-rt",
         project_desc = "LLVM compiler runtime library",
         project_url = "https://compiler-rt.llvm.org",
-        version = "10.0.0",
-        sha256 = "6a7da64d3a0a7320577b68b9ca4933bdcab676e898b759850e827333c3282c75",
+        version = "11.0.1",
+        sha256 = "087be3f1116e861cd969c9b0b0903c27028b52eaf45157276f50a9c2500687fc",
         # Only allow peeking at fuzzer related files for now.
         strip_prefix = "compiler-rt-{version}.src",
         urls = ["https://github.com/llvm/llvm-project/releases/download/llvmorg-{version}/compiler-rt-{version}.src.tar.xz"],
-        last_updated = "2020-03-24",
+        release_date = "2020-12-18",
         use_category = ["test_only"],
     ),
     upb = dict(
         project_name = "upb",
         project_desc = "A small protobuf implementation in C (gRPC dependency)",
         project_url = "https://github.com/protocolbuffers/upb",
-        version = "8a3ae1ef3e3e3f26b45dec735c5776737fc7247f",
-        sha256 = "e9f281c56ab1eb1f97a80ca8a83bb7ef73d230eabb8591f83876f4e7b85d9b47",
+        version = "de76b31f9c56b28120580d53a6f8d7941fdb79eb",
+        sha256 = "487d84ce85065ff89ccde1c1ac2ea1515d2be411306e4adf1be6861dc4a4a86b",
+        release_date = "2020-12-29",
         strip_prefix = "upb-{version}",
         urls = ["https://github.com/protocolbuffers/upb/archive/{version}.tar.gz"],
         use_category = ["controlplane"],
-        last_updated = "2019-11-19",
         cpe = "N/A",
     ),
     kafka_source = dict(
@@ -820,7 +896,7 @@ DEPENDENCY_REPOSITORIES_SPEC = dict(
         urls = ["https://github.com/apache/kafka/archive/{version}.zip"],
         use_category = ["dataplane_ext"],
         extensions = ["envoy.filters.network.kafka_broker"],
-        last_updated = "2020-08-26",
+        release_date = "2020-03-03",
         cpe = "cpe:2.3:a:apache:kafka:*",
     ),
     kafka_server_binary = dict(
@@ -830,8 +906,8 @@ DEPENDENCY_REPOSITORIES_SPEC = dict(
         version = "2.4.1",
         sha256 = "2177cbd14118999e1d76fec628ca78ace7e6f841219dbc6035027c796bbe1a2a",
         strip_prefix = "kafka_2.12-{version}",
-        urls = ["https://mirrors.gigenet.com/apache/kafka/{version}/kafka_2.12-{version}.tgz"],
-        last_updated = "2020-08-26",
+        urls = ["https://archive.apache.org/dist/kafka/{version}/kafka_2.12-{version}.tgz"],
+        release_date = "2020-03-12",
         use_category = ["test_only"],
     ),
     kafka_python_client = dict(
@@ -842,17 +918,16 @@ DEPENDENCY_REPOSITORIES_SPEC = dict(
         sha256 = "05f7c6eecb402f11fcb7e524c903f1ba1c38d3bdc9bf42bc8ec3cf7567b9f979",
         strip_prefix = "kafka-python-{version}",
         urls = ["https://github.com/dpkp/kafka-python/archive/{version}.tar.gz"],
-        last_updated = "2020-08-26",
+        release_date = "2020-02-20",
         use_category = ["test_only"],
     ),
     proxy_wasm_cpp_sdk = dict(
         project_name = "WebAssembly for Proxies (C++ SDK)",
         project_desc = "WebAssembly for Proxies (C++ SDK)",
         project_url = "https://github.com/proxy-wasm/proxy-wasm-cpp-sdk",
-        version = "7afb39d868a973caa6216a535c24e37fb666b6f3",
-        sha256 = "213d0b441bcc3df2c87933b24a593b5fd482fa8f4db158b707c60005b9e70040",
+        version = "258b4c6974dba5255a9c433450971a56b29228ff",
+        sha256 = "8ff6231a5f0cc07bc865293e56eb37f60f5fd8d5a3889455c4e4ad9dbe54a5f7",
         strip_prefix = "proxy-wasm-cpp-sdk-{version}",
-        # 2020-09-10
         urls = ["https://github.com/proxy-wasm/proxy-wasm-cpp-sdk/archive/{version}.tar.gz"],
         use_category = ["dataplane_ext"],
         extensions = [
@@ -861,17 +936,20 @@ DEPENDENCY_REPOSITORIES_SPEC = dict(
             "envoy.filters.http.wasm",
             "envoy.filters.network.wasm",
             "envoy.stat_sinks.wasm",
+            "envoy.wasm.runtime.null",
+            "envoy.wasm.runtime.v8",
+            "envoy.wasm.runtime.wavm",
+            "envoy.wasm.runtime.wasmtime",
         ],
-        last_updated = "2020-07-29",
+        release_date = "2021-03-10",
         cpe = "N/A",
     ),
     proxy_wasm_cpp_host = dict(
         project_name = "WebAssembly for Proxies (C++ host implementation)",
         project_desc = "WebAssembly for Proxies (C++ host implementation)",
         project_url = "https://github.com/proxy-wasm/proxy-wasm-cpp-host",
-        # 2020-09-10
-        version = "49ed20e895b728aae6b811950a2939ecbaf76f7c",
-        sha256 = "fa03293d01450b9164f8f56ef9227301f7d1af4f373f996400f75c93f6ebc822",
+        version = "aba2704bcd7d8adce2ccaf07c4ecbaf0cffeb7ef",
+        sha256 = "6263b45f87fc0c106eb88f31238553b1bde68f8a5ea25e20e95a5e6624a896d2",
         strip_prefix = "proxy-wasm-cpp-host-{version}",
         urls = ["https://github.com/proxy-wasm/proxy-wasm-cpp-host/archive/{version}.tar.gz"],
         use_category = ["dataplane_ext"],
@@ -881,37 +959,49 @@ DEPENDENCY_REPOSITORIES_SPEC = dict(
             "envoy.filters.http.wasm",
             "envoy.filters.network.wasm",
             "envoy.stat_sinks.wasm",
+            "envoy.wasm.runtime.null",
+            "envoy.wasm.runtime.v8",
+            "envoy.wasm.runtime.wavm",
+            "envoy.wasm.runtime.wasmtime",
         ],
-        last_updated = "2020-07-29",
+        release_date = "2021-04-08",
         cpe = "N/A",
     ),
-    # TODO: upgrade to the latest version (1.41 currently fails tests)
+    proxy_wasm_rust_sdk = dict(
+        project_name = "WebAssembly for Proxies (Rust SDK)",
+        project_desc = "WebAssembly for Proxies (Rust SDK)",
+        project_url = "https://github.com/proxy-wasm/proxy-wasm-rust-sdk",
+        version = "28a94df25659b2107b67a11df0112f8f6833558b",
+        sha256 = "d3da0042fc119282223b7955962e8b3eed261242c8493f9dc8d07a08ca7e2e3e",
+        strip_prefix = "proxy-wasm-rust-sdk-{version}",
+        urls = ["https://github.com/proxy-wasm/proxy-wasm-rust-sdk/archive/{version}.tar.gz"],
+        use_category = ["test_only"],
+        release_date = "2021-02-09",
+        cpe = "N/A",
+    ),
     emscripten_toolchain = dict(
         project_name = "Emscripten SDK",
         project_desc = "Emscripten SDK (use by Wasm)",
         project_url = "https://github.com/emscripten-core/emsdk",
-        version = "1.39",
-        sha256 = "4ac0f1f3de8b3f1373d435cd7e58bd94de4146e751f099732167749a229b443b",
-        patch_cmds = [
-            "[[ \"$(uname -m)\" == \"x86_64\" ]] && ./emsdk install 1.39.6-upstream && ./emsdk activate --embedded 1.39.6-upstream || true",
-        ],
-        strip_prefix = "emsdk-{version}.6",
-        urls = ["https://github.com/emscripten-core/emsdk/archive/{version}.6.tar.gz"],
+        version = "2.0.7",
+        sha256 = "ce7a5c76e8b425aca874cea329fd9ac44b203b777053453b6a37b4496c5ce34f",
+        strip_prefix = "emsdk-{version}",
+        urls = ["https://github.com/emscripten-core/emsdk/archive/{version}.tar.gz"],
         use_category = ["build"],
-        last_updated = "2020-07-29",
+        release_date = "2020-10-13",
     ),
-    io_bazel_rules_rust = dict(
+    rules_rust = dict(
         project_name = "Bazel rust rules",
         project_desc = "Bazel rust rules (used by Wasm)",
         project_url = "https://github.com/bazelbuild/rules_rust",
-        version = "fda9a1ce6482973adfda022cadbfa6b300e269c3",
-        sha256 = "484a2b2b67cd2d1fa1054876de7f8d291c4b203fd256bc8cbea14d749bb864ce",
-        # Last commit where "out_binary = True" works.
-        # See: https://github.com/bazelbuild/rules_rust/issues/386
+        version = "1b648302edb64d3ddcc159655bf065bff40e6571",
+        sha256 = "242deacf4c9e4274d90964689dfae6c245bfb1bfa5e3336b2ad3b44f2541b70c",
         strip_prefix = "rules_rust-{version}",
         urls = ["https://github.com/bazelbuild/rules_rust/archive/{version}.tar.gz"],
-        use_category = ["build"],
-        last_updated = "2020-07-29",
+        use_category = ["dataplane_ext"],
+        extensions = ["envoy.wasm.runtime.wasmtime"],
+        release_date = "2021-04-02",
+        cpe = "N/A",
     ),
     rules_antlr = dict(
         project_name = "ANTLR Rules for Bazel",
@@ -921,55 +1011,37 @@ DEPENDENCY_REPOSITORIES_SPEC = dict(
         sha256 = "7249d1569293d9b239e23c65f6b4c81a07da921738bde0dfeb231ed98be40429",
         strip_prefix = "rules_antlr-{version}",
         urls = ["https://github.com/marcohu/rules_antlr/archive/{version}.tar.gz"],
-        # This should be "build", but that trips the verification in the docs.
+        # ANTLR has a runtime component, so is not purely build.
         use_category = ["dataplane_ext"],
         extensions = [
             "envoy.access_loggers.wasm",
             "envoy.bootstrap.wasm",
+            "envoy.rate_limit_descriptors.expr",
             "envoy.filters.http.wasm",
             "envoy.filters.network.wasm",
             "envoy.stat_sinks.wasm",
         ],
-        last_updated = "2020-07-29",
+        release_date = "2019-06-21",
         cpe = "N/A",
     ),
     antlr4_runtimes = dict(
         project_name = "ANTLR v4",
         project_desc = "ANTLR (ANother Tool for Language Recognition) is a powerful parser generator for reading, processing, executing, or translating structured text or binary files",
         project_url = "https://github.com/antlr/antlr4",
-        version = "4.7.1",
-        sha256 = "4d0714f441333a63e50031c9e8e4890c78f3d21e053d46416949803e122a6574",
+        version = "4.7.2",
+        sha256 = "46f5e1af5f4bd28ade55cb632f9a069656b31fc8c2408f9aa045f9b5f5caad64",
         strip_prefix = "antlr4-{version}",
         urls = ["https://github.com/antlr/antlr4/archive/{version}.tar.gz"],
         use_category = ["dataplane_ext"],
         extensions = [
             "envoy.access_loggers.wasm",
             "envoy.bootstrap.wasm",
+            "envoy.rate_limit_descriptors.expr",
             "envoy.filters.http.wasm",
             "envoy.filters.network.wasm",
             "envoy.stat_sinks.wasm",
         ],
-        last_updated = "2020-07-29",
+        release_date = "2018-12-18",
         cpe = "N/A",
     ),
 )
-
-def _format_version(s, version):
-    return s.format(version = version, dash_version = version.replace(".", "-"), underscore_version = version.replace(".", "_"))
-
-# Interpolate {version} in the above dependency specs. This code should be capable of running in both Python
-# and Starlark.
-def _dependency_repositories():
-    locations = {}
-    for key, location in DEPENDENCY_REPOSITORIES_SPEC.items():
-        mutable_location = dict(location)
-        locations[key] = mutable_location
-
-        # Fixup with version information.
-        if "version" in location:
-            if "strip_prefix" in location:
-                mutable_location["strip_prefix"] = _format_version(location["strip_prefix"], location["version"])
-            mutable_location["urls"] = [_format_version(url, location["version"]) for url in location["urls"]]
-    return locations
-
-DEPENDENCY_REPOSITORIES = _dependency_repositories()
